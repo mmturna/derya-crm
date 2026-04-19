@@ -1,0 +1,342 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  SALES
+}
+
+enum CustomerStatus {
+  UNTOUCHED
+  IN_PROGRESS
+  WORKED
+  LOST
+}
+
+enum ActivityType {
+  VISIT
+  CALL
+  EMAIL
+  WHATSAPP
+}
+
+enum QuoteResult {
+  PENDING
+  WON
+  LOST
+}
+
+enum CategoryType {
+  CLASS1
+  CLASS2
+  PRODUCT
+  LANE
+}
+
+enum TaskStatus {
+  OPEN
+  DONE
+  CANCELLED
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model Office {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users     User[]
+  companies Company[]
+  activities Activity[]
+  quotes Quote[]
+  shipments ShipmentRecord[]
+  assignmentChanges AssignmentChange[]
+  events    Event[]
+  categories CategoryOption[]
+  tasks Task[]
+  riskAlerts RiskAlert[]
+  savedViews SavedView[]
+
+  @@unique([name])
+}
+
+model SavedView {
+  id        String   @id @default(cuid())
+  officeId  String
+  userId    String
+  name      String
+  filters   Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  office Office @relation(fields: [officeId], references: [id], onDelete: Cascade)
+
+  @@index([officeId, userId, createdAt])
+  @@unique([officeId, userId, name])
+}
+
+model CategoryOption {
+  id        String       @id @default(cuid())
+  officeId  String
+  type      CategoryType
+  value     String
+  isActive  Boolean      @default(true)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  office Office @relation(fields: [officeId], references: [id], onDelete: Cascade)
+
+  @@unique([officeId, type, value])
+  @@index([officeId, type, isActive])
+}
+
+model User {
+  id           String   @id @default(cuid())
+  officeId     String
+  email        String
+  passwordHash String
+  fullName     String
+  role         UserRole @default(SALES)
+  isActive     Boolean  @default(true)
+  canViewWholeOffice Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  office Office @relation(fields: [officeId], references: [id], onDelete: Cascade)
+
+  ownedCompanies        CompanyOwner[]
+  activitiesCreated     Activity[]     @relation("ActivityCreatedBy")
+  assignmentChangesMade AssignmentChange[] @relation("AssignmentChangedBy")
+
+  @@unique([officeId, email])
+  @@index([officeId, role])
+}
+
+model Company {
+  id        String         @id @default(cuid())
+  officeId  String
+  name      String
+  status    CustomerStatus @default(UNTOUCHED)
+
+  // Category values (one per category for MVP)
+  class1     String? // Passive / Potential / Active
+  class2     String? // A-E
+  product    String? // Sea / Air / Road / LTL / Project (MVP: single)
+  lane       String? // Region e.g., "Mediterranean", "America", "Europe"
+  direction  String? // Import / Export / Both
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  office Office @relation(fields: [officeId], references: [id], onDelete: Cascade)
+
+  contacts   Contact[]
+  owners     CompanyOwner[]
+  activities Activity[]
+  quotes     Quote[]
+  shipments  ShipmentRecord[]
+  assignmentChanges AssignmentChange[]
+  tasks Task[]
+  riskAlerts RiskAlert[]
+
+  @@unique([officeId, name])
+  @@index([officeId, status])
+  @@index([officeId, class1])
+  @@index([officeId, class2])
+  @@index([officeId, product])
+  @@index([officeId, lane])
+}
+
+model Contact {
+  id        String  @id @default(cuid())
+  companyId String
+  fullName  String
+  title     String?
+  email     String?
+  phone     String?
+  notes     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+}
+
+// Multiple owners per company (requested)
+model CompanyOwner {
+  id        String @id @default(cuid())
+  companyId String
+  userId    String
+  isPrimary Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, userId])
+  @@index([userId])
+}
+
+model Activity {
+  id        String       @id @default(cuid())
+  officeId  String
+  companyId String
+  type      ActivityType
+  occurredAt DateTime    @default(now())
+
+  subject   String?
+  body      String?
+  audioUrl  String?
+
+  createdByUserId String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  office  Office  @relation(fields: [officeId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdBy User? @relation("ActivityCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([officeId, companyId, occurredAt])
+  @@index([officeId, type, occurredAt])
+}
+
+model Quote {
+  id        String      @id @default(cuid())
+  officeId  String
+  companyId String
+  result    QuoteResult @default(PENDING)
+  origin    String?     // e.g. Istanbul, TR
+  destination String?   // e.g. Hamburg, DE
+  mode      String?     // AIR / SEA-FCL / SEA-LCL / ROAD / COURIER
+  value     Float?
+  currency  String?     // e.g. USD, EUR, TRY
+  notes     String?
+  lostReason String?    // Price / Competitor / No volume / Wrong lane / Other
+  quotedAt  DateTime    @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  office  Office  @relation(fields: [officeId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([officeId, companyId, quotedAt])
+  @@index([officeId, result, quotedAt])
+}
+
+// Assignment changes log (audit trail)
+model AssignmentChange {
+  id        String   @id @default(cuid())
+  officeId  String
+  companyId String
+  changedByUserId String?
+  createdAt DateTime @default(now())
+
+  // JSON snapshot for MVP simplicity (who added/removed; primary changes, etc.)
+  diff Json
+
+  office Office @relation(fields: [officeId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  changedBy User? @relation("AssignmentChangedBy", fields: [changedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([officeId, companyId, createdAt])
+}
+
+// Generic event table for future risk signals / phase2 integrations
+model Event {
+  id        String   @id @default(cuid())
+  officeId  String
+  type      String
+  entityType String?
+  entityId  String?
+  payload   Json
+  createdAt DateTime @default(now())
+
+  office Office @relation(fields: [officeId], references: [id], onDelete: Cascade)
+
+  @@index([officeId, type, createdAt])
+  @@index([officeId, entityType, entityId])
+}
+
+model Task {
+  id        String     @id @default(cuid())
+  officeId  String
+  companyId String
+  title     String
+  details   String?
+  dueAt     DateTime?
+  status    TaskStatus @default(OPEN)
+  assignedToUserId String?
+  createdByUserId String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  office Office @relation(fields: [officeId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([officeId, status, dueAt])
+  @@index([companyId, status])
+}
+
+model RiskAlert {
+  id        String    @id @default(cuid())
+  officeId  String
+  companyId String
+  level     RiskLevel
+  reason    String
+  isOpen    Boolean   @default(true)
+  resolvedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  office Office @relation(fields: [officeId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([officeId, isOpen, level, createdAt])
+  @@index([companyId, isOpen])
+}
+
+// Shipment history — populated from Siber in Phase 2, or manually entered
+model ShipmentRecord {
+  id          String   @id @default(cuid())
+  officeId    String
+  companyId   String
+  origin      String?
+  destination String?
+  mode        String?  // AIR / SEA-FCL / SEA-LCL / ROAD / COURIER
+  weight      Float?   // kg
+  volume      Float?   // cbm
+  revenue     Float?
+  profit      Float?
+  currency    String?  @default("USD")
+  shipmentDate DateTime
+  reference   String?  // Siber / carrier reference number
+  source      String   @default("manual") // "siber" | "manual"
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  office  Office  @relation(fields: [officeId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([officeId, companyId, shipmentDate])
+  @@index([officeId, shipmentDate])
+}
+

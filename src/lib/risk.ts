@@ -1,0 +1,70 @@
+import { prisma } from "@/lib/prisma";
+
+export async function refreshRiskAlerts(officeId: string) {
+  const staleDate = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+  const companies = await prisma.company.findMany({
+    where: { officeId },
+    include: {
+      activities: {
+        orderBy: { occurredAt: "desc" },
+        take: 1
+      }
+    }
+  });
+
+  const riskyCompanies = companies.filter(
+    (company) => company.activities.length === 0 || company.activities[0].occurredAt < staleDate
+  );
+
+  const riskyIds = new Set(riskyCompanies.map((c) => c.id));
+
+  const existingOpen = await prisma.riskAlert.findMany({
+    where: { officeId, isOpen: true },
+    select: { id: true, companyId: true }
+  });
+
+  // Close alerts for accounts that are no longer stale
+  const toClose = existingOpen.filter((a) => !riskyIds.has(a.companyId));
+  if (toClose.length > 0) {
+    await prisma.riskAlert.updateMany({
+      where: { id: { in: toClose.map((x) => x.id) } },
+      data: { isOpen: false, resolvedAt: new Date() }
+    });
+  }
+
+  // Open new alerts for newly stale accounts
+  const existingByCompany = new Set(existingOpen.map((a) => a.companyId));
+  for (const company of riskyCompanies) {
+    if (!existingByCompany.has(company.id)) {
+      await prisma.riskAlert.create({
+        data: {
+          officeId,
+          companyId: company.id,
+          level: "MEDIUM",
+          reason: "No activity in 14+ days"
+        }
+      });
+    }
+  }
+
+  // Log run time so we can throttle auto-runs
+  await prisma.event.create({
+    data: {
+      officeId,
+      type: "risk.scan.auto",
+      payload: { staleCount: riskyCompanies.length, closedCount: toClose.length }
+    }
+  });
+
+  return { staleCount: riskyCompanies.length };
+}
+
+/** Returns true if a risk scan has NOT been run in the last `hours` hours */
+export async function shouldRunRiskScan(officeId: string, hours = 4): Promise<boolean> {
+  const since = new Date(Date.now() - hours * 60 * 60 * 1000);
+  const last = await prisma.event.findFirst({
+    where: { officeId, type: "risk.scan.auto", createdAt: { gte: since } },
+    select: { id: true }
+  });
+  return last === null;
+}
