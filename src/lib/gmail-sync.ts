@@ -150,11 +150,13 @@ export async function syncEmailAccount(accountId: string): Promise<{ ok: true; p
     // Inbound classification (if no thread match yet)
     let attachJobId: string | null = null;
     let attachInquiryId: string | null = null;
+    let classificationLabel: string | null = null;
     if (direction === "INBOUND" && !threadId) {
       try {
         const cls = await classifyInboundEmail({
           subject, fromEmail, bodyText: body, officeId: account.officeId,
         });
+        classificationLabel = cls.kind;
         if (cls.kind === "RFQ") {
           // Create new Inquiry
           const inq = await prisma.inquiry.create({
@@ -245,6 +247,7 @@ export async function syncEmailAccount(accountId: string): Promise<{ ok: true; p
         subject,
         bodyText: body.slice(0, 50000),
         sentAt,
+        classification: classificationLabel,
       },
     });
     await prisma.emailThread.update({

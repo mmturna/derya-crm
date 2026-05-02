@@ -612,6 +612,7 @@ model EmailMessage {
   attachments String?       // JSON array {name, url, mimeType, size}
   sentAt     DateTime       @default(now())
   isRead     Boolean        @default(false)
+  classification String?    // RFQ | CARRIER_REPLY | CUSTOMER_REPLY | OTHER (set by AI on inbound)
   createdAt  DateTime       @default(now())
 
   thread  EmailThread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
