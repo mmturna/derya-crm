@@ -3,8 +3,10 @@ import { prisma } from "@/lib/prisma";
 import { requireSession } from "@/lib/auth";
 import { getFocusedJobId } from "@/lib/job-focus";
 import { Icon } from "@/components/icon";
+import { JobConfirmActions } from "@/components/job-confirm-button";
 
 const STATUSES = [
+  { key: "PROPOSED",   label: "Proposed"   },
   { key: "INQUIRY",    label: "Inquiry"    },
   { key: "QUOTED",     label: "Quoted"     },
   { key: "BOOKED",     label: "Booked"     },
@@ -33,7 +35,7 @@ export default async function JobsPage({
   });
 
   const byStatus: Record<StatusKey, typeof jobs> = {
-    INQUIRY: [], QUOTED: [], BOOKED: [], IN_TRANSIT: [], CUSTOMS: [], DELIVERED: [],
+    PROPOSED: [], INQUIRY: [], QUOTED: [], BOOKED: [], IN_TRANSIT: [], CUSTOMS: [], DELIVERED: [],
   };
   for (const j of jobs) {
     if (j.status in byStatus) byStatus[j.status as StatusKey].push(j);
@@ -99,8 +101,23 @@ export default async function JobsPage({
                   <div className="job-col-empty">—</div>
                 ) : (
                   colJobs.map((job) => (
-                    <a key={job.id} href={`/dashboard/jobs/${job.id}`} className={`job-card${focusedId === job.id ? " focus-match" : ""}`}>
-                      <div className="job-card-ref">{job.reference}</div>
+                    <a
+                      key={job.id}
+                      href={`/dashboard/jobs/${job.id}`}
+                      className={`job-card${focusedId === job.id ? " focus-match" : ""}`}
+                      style={job.status === "PROPOSED" ? { borderStyle: "dashed", borderColor: "var(--brand)", background: "var(--surface)" } : undefined}
+                    >
+                      <div className="job-card-ref" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        {job.reference}
+                        {job.status === "PROPOSED" && (
+                          <span style={{
+                            fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
+                            background: "var(--brand-light)", color: "var(--brand)",
+                            border: "1px solid var(--brand-border)",
+                            textTransform: "uppercase", letterSpacing: "0.06em",
+                          }}>DRAFT</span>
+                        )}
+                      </div>
                       <div className="job-card-company">{job.company?.name ?? "—"}</div>
                       <div className="job-card-route">
                         {job.origin && job.destination ? (
@@ -115,6 +132,7 @@ export default async function JobsPage({
                           </span>
                         )}
                       </div>
+                      {job.status === "PROPOSED" && <JobConfirmActions jobId={job.id} />}
                     </a>
                   ))
                 )}

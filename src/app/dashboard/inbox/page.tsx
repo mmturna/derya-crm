@@ -242,16 +242,24 @@ export default async function InboxPage({
                 </div>
 
                 {/* Expandable messages */}
-                <ThreadAccordion threadId={t.id} messageCount={t.messages.length} messages={t.messages.map((m) => ({
-                  id: m.id,
-                  direction: m.direction,
-                  fromName: m.fromName,
-                  fromEmail: m.fromEmail,
-                  subject: m.subject,
-                  bodyText: m.bodyText,
-                  sentAt: m.sentAt.toISOString(),
-                  classification: m.classification,
-                }))} />
+                <ThreadAccordion threadId={t.id} messageCount={t.messages.length} messages={t.messages.map((m) => {
+                  let attachments: { filename: string; mimeType: string; size: number; attachmentId: string }[] = [];
+                  if (m.attachments) {
+                    try { attachments = JSON.parse(m.attachments); } catch { attachments = []; }
+                  }
+                  return {
+                    id: m.id,
+                    direction: m.direction,
+                    fromName: m.fromName,
+                    fromEmail: m.fromEmail,
+                    subject: m.subject,
+                    bodyText: m.bodyText,
+                    sentAt: m.sentAt.toISOString(),
+                    classification: m.classification,
+                    gmailMessageId: m.gmailMessageId,
+                    attachments,
+                  };
+                })} />
               </div>
             );
           })}

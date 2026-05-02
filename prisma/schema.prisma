@@ -55,6 +55,7 @@ enum RiskLevel {
 }
 
 enum JobStatus {
+  PROPOSED
   INQUIRY
   QUOTED
   BOOKED
@@ -604,9 +605,10 @@ model EmailThread {
 
 model EmailMessage {
   id         String         @id @default(cuid())
-  threadId   String
-  accountId  String?
-  externalId String?        // provider message-id for dedup
+  threadId        String
+  accountId       String?
+  externalId      String?  // provider Message-ID header for dedup
+  gmailMessageId  String?  // provider native message id (Gmail msg.id) — used to fetch attachments
   direction  EmailDirection
   fromEmail  String
   fromName   String?

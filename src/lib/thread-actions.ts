@@ -4,6 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { revalidatePath } from "next/cache";
 import { requireSession } from "./auth";
 import { prisma } from "./prisma";
+import { createProposedJobForInquiry } from "./job-actions";
 
 export async function createInquiryFromThread(threadId: string): Promise<{ ok: true; inquiryId: string } | { error: string }> {
   const session = await requireSession();
@@ -106,9 +107,13 @@ Be conservative — null is better than guessing. If a thread has BOTH sourcing 
     data: { classification: "RELATED_NOTE", classificationReason: "Attached when thread was promoted to Inquiry", classificationAt: new Date() },
   });
 
+  // Spin up a draft Job on the kanban board for this inquiry.
+  await createProposedJobForInquiry(inquiry.id);
+
   revalidatePath("/dashboard");
   revalidatePath("/dashboard/rfq");
   revalidatePath("/dashboard/inbox");
+  revalidatePath("/dashboard/jobs");
   return { ok: true, inquiryId: inquiry.id };
 }
 
@@ -243,6 +248,8 @@ ${jobHints || "(none)"}`,
           where: { threadId, direction: "INBOUND", OR: [{ classification: null }, { classification: "OTHER" }] },
           data: { classification: "RELATED_NOTE", classificationReason: "Auto-linked to existing inquiry", classificationAt: new Date() },
         });
+        // Make sure the inquiry has a draft Job on the board.
+        await createProposedJobForInquiry(inq.id);
         return { ok: true, created: false, linkedInquiryId: inq.id };
       }
     }
@@ -306,6 +313,9 @@ ${jobHints || "(none)"}`,
     where: { threadId, direction: "INBOUND", OR: [{ classification: null }, { classification: "OTHER" }] },
     data: { classification: "RELATED_NOTE", classificationReason: "Attached when thread was auto-promoted to Inquiry", classificationAt: new Date() },
   });
+
+  // Spin up a draft Job on the board for the new Inquiry.
+  await createProposedJobForInquiry(inquiry.id);
 
   return { ok: true, created: true, inquiryId: inquiry.id };
 }

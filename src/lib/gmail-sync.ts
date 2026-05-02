@@ -41,6 +41,24 @@ function decodeBase64Url(s: string): string {
   return Buffer.from(norm, "base64").toString("utf-8");
 }
 
+type AttachmentMeta = { filename: string; mimeType: string; size: number; attachmentId: string };
+
+function extractAttachments(payload: any, out: AttachmentMeta[] = []): AttachmentMeta[] {
+  if (!payload) return out;
+  if (payload.filename && payload.body?.attachmentId) {
+    out.push({
+      filename: payload.filename,
+      mimeType: payload.mimeType ?? "application/octet-stream",
+      size: payload.body.size ?? 0,
+      attachmentId: payload.body.attachmentId,
+    });
+  }
+  if (payload.parts?.length) {
+    for (const p of payload.parts) extractAttachments(p, out);
+  }
+  return out;
+}
+
 function extractPlainBody(payload: GmailMessage["payload"]): string {
   if (payload.mimeType === "text/plain" && payload.body?.data) {
     return decodeBase64Url(payload.body.data);
@@ -163,6 +181,7 @@ export async function syncEmailAccount(accountId: string): Promise<
       const fromName = fromRaw.includes("<") ? fromRaw.split("<")[0].trim().replace(/^"|"$/g, "") : null;
       const direction = fromEmail.toLowerCase() === account.email.toLowerCase() ? "OUTBOUND" : "INBOUND";
       const body = extractPlainBody(msg.payload);
+      const attachments = extractAttachments(msg.payload);
 
       // Per-message classification (lightweight; AI may match an existing job/inquiry).
       let classificationLabel: string | null = null;
@@ -211,12 +230,14 @@ export async function syncEmailAccount(accountId: string): Promise<
           threadId: localThread.id,
           accountId: account.id,
           externalId,
+          gmailMessageId: msg.id,
           direction,
           fromEmail,
           fromName,
           toEmails: JSON.stringify(toRaw ? [toRaw] : []),
           subject,
           bodyText: body.slice(0, 50000),
+          attachments: attachments.length > 0 ? JSON.stringify(attachments) : null,
           sentAt,
           classification: classificationLabel,
           classificationReason,
