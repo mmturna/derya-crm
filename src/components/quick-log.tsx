@@ -127,7 +127,7 @@ export function QuickLog({
             padding: "4px 0",
           }}
         >
-          {showAudio ? "Hide audio" : "🎙 Voice note"}
+          {showAudio ? "Hide audio" : "Voice note"}
         </button>
       </div>
 

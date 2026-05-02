@@ -103,7 +103,7 @@ export function ActivityFeed({
         </h2>
         {!allEmpty && (
           <p style={{ marginTop: 3, fontSize: 13, color: "var(--text-3)" }}>
-            Here's what needs your attention.
+            Here&apos;s what needs your attention.
           </p>
         )}
       </div>

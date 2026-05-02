@@ -18,3 +18,4 @@ prisma/*.db-journal
 .DS_Store
 *.log
 npm-debug.log*
+.claude/worktrees/

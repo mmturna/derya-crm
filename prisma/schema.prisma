@@ -52,6 +52,21 @@ enum RiskLevel {
   HIGH
 }
 
+enum JobStatus {
+  INQUIRY
+  QUOTED
+  BOOKED
+  IN_TRANSIT
+  CUSTOMS
+  DELIVERED
+  CANCELLED
+}
+
+enum EmailDirection {
+  INBOUND
+  OUTBOUND
+}
+
 model Office {
   id        String   @id @default(cuid())
   name      String
@@ -63,6 +78,14 @@ model Office {
   activities Activity[]
   quotes Quote[]
   shipments ShipmentRecord[]
+  documents CompanyDocument[]
+  laneRates LaneRate[]
+  marginProfiles MarginProfile[]
+  inquiries Inquiry[]
+  jobs         Job[]
+  jobDocuments JobDocument[]
+  emailAccounts EmailAccount[]
+  emailThreads  EmailThread[]
   assignmentChanges AssignmentChange[]
   events    Event[]
   categories CategoryOption[]
@@ -149,9 +172,12 @@ model Company {
   activities Activity[]
   quotes     Quote[]
   shipments  ShipmentRecord[]
+  documents  CompanyDocument[]
   assignmentChanges AssignmentChange[]
   tasks Task[]
   riskAlerts RiskAlert[]
+  jobs       Job[]
+  inquiries  Inquiry[]
 
   @@unique([officeId, name])
   @@index([officeId, status])
@@ -313,6 +339,114 @@ model RiskAlert {
   @@index([companyId, isOpen])
 }
 
+model CompanyDocument {
+  id          String   @id @default(cuid())
+  officeId    String
+  companyId   String
+  name        String
+  url         String
+  docType     String?  // contract / invoice / proposal / other
+  uploadedByUserId String?
+  createdAt   DateTime @default(now())
+
+  office  Office  @relation(fields: [officeId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([officeId, companyId, createdAt])
+}
+
+// ── Pricing module ────────────────────────────────────────────────────────
+
+model LaneRate {
+  id          String   @id @default(cuid())
+  officeId    String
+  origin      String   // e.g. Istanbul
+  destination String   // e.g. Hamburg
+  mode        String   // AIR / SEA-FCL / SEA-LCL / ROAD / COURIER
+  baseAmount  Float
+  currency    String   @default("USD")
+  validFrom   DateTime @default(now())
+  validTo     DateTime?
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  office Office @relation(fields: [officeId], references: [id], onDelete: Cascade)
+
+  @@index([officeId, origin, destination, mode])
+}
+
+model MarginProfile {
+  id            String  @id @default(cuid())
+  officeId      String
+  label         String  // e.g. "New client", "Existing – standard", "Urgent"
+  customerTier  String? // new / existing / vip
+  urgency       String? // normal / asap / flexible
+  marginPercent Float
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  office Office @relation(fields: [officeId], references: [id], onDelete: Cascade)
+
+  @@index([officeId])
+}
+
+model Inquiry {
+  id            String   @id @default(cuid())
+  officeId      String
+  companyId     String?
+  subject       String
+  fromEmail     String?
+  fromCompany   String?
+  origin        String?
+  destination   String?
+  mode          String?  // AIR / SEA-FCL / SEA-LCL / ROAD / COURIER
+  containerType String?  // 20GP / 40HC / 40DRY / 20DRY etc.
+  commodity     String?
+  weight        Float?
+  volume        Float?
+  incoterms     String?
+  cargoReadyDate DateTime?
+  status        String   @default("INGESTED") // INGESTED / PARSED / PRICED / QUOTED / WON / LOST
+  rawEmailBody  String?
+  parsedData    String?  // JSON: AI-extracted fields
+  notes         String?
+  receivedAt    DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  office        Office        @relation(fields: [officeId], references: [id], onDelete: Cascade)
+  company       Company?      @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  carrierQuotes CarrierQuote[]
+  job           Job?
+  emailThreads  EmailThread[]
+
+  @@index([officeId, status, receivedAt])
+  @@index([officeId, companyId])
+}
+
+model CarrierQuote {
+  id          String   @id @default(cuid())
+  inquiryId   String
+  carrier     String
+  quoteType   String   @default("EMAIL") // API / EMAIL
+  rateName    String?
+  total20     Float?
+  total40     Float?
+  total40HC   Float?
+  transitDays Int?
+  service     String?
+  validity    String?
+  transshipments String?
+  status      String   @default("PENDING") // PENDING / RECEIVED
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  inquiry Inquiry @relation(fields: [inquiryId], references: [id], onDelete: Cascade)
+
+  @@index([inquiryId])
+}
+
 // Shipment history — populated from Siber in Phase 2, or manually entered
 model ShipmentRecord {
   id          String   @id @default(cuid())
@@ -340,3 +474,148 @@ model ShipmentRecord {
   @@index([officeId, shipmentDate])
 }
 
+// ── Jobs (forwarding operations) ─────────────────────────────────────────────
+
+model Job {
+  id               String    @id @default(cuid())
+  officeId         String
+  companyId        String?
+  assignedToUserId String?
+  inquiryId        String?   @unique  // set when converted from an Inquiry
+
+  reference        String    // e.g. JOB-2025-001
+  status           JobStatus @default(INQUIRY)
+  mode             String?   // AIR / SEA-FCL / SEA-LCL / ROAD / COURIER
+  origin           String?
+  destination      String?
+  commodity        String?
+  incoterms        String?
+  weight           Float?    // kg
+  volume           Float?    // cbm
+  packages         Int?
+
+  etd              DateTime?
+  eta              DateTime?
+
+  revenue          Float?
+  cost             Float?
+  currency         String    @default("USD")
+
+  notes            String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  office       Office        @relation(fields: [officeId], references: [id], onDelete: Cascade)
+  company      Company?      @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  inquiry      Inquiry?      @relation(fields: [inquiryId], references: [id])
+  documents    JobDocument[]
+  milestones   JobMilestone[]
+  emailThreads EmailThread[]
+
+  @@unique([officeId, reference])
+  @@index([officeId, status, createdAt])
+  @@index([officeId, companyId])
+}
+
+model JobDocument {
+  id               String   @id @default(cuid())
+  jobId            String
+  officeId         String
+  name             String
+  url              String?
+  docType          String   // BL / INVOICE / PACKING_LIST / COO / CUSTOMS / BOOKING / OTHER
+  status           String   @default("PENDING") // PENDING / UPLOADED / APPROVED
+  uploadedByUserId String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  job    Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  office Office @relation(fields: [officeId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+  @@index([officeId, docType])
+}
+
+model JobMilestone {
+  id        String    @id @default(cuid())
+  jobId     String
+  type      String    // BOOKING / ETD / ETA / CUSTOMS_ENTRY / CUSTOMS_RELEASE / DELIVERY
+  plannedAt DateTime?
+  actualAt  DateTime?
+  note      String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, type])
+}
+
+// ── Email integration ─────────────────────────────────────────────────────────
+
+model EmailAccount {
+  id           String    @id @default(cuid())
+  officeId     String
+  email        String
+  provider     String    // GMAIL / OUTLOOK / IMAP
+  accessToken  String?
+  refreshToken String?
+  isActive     Boolean   @default(true)
+  lastSyncAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  office   Office         @relation(fields: [officeId], references: [id], onDelete: Cascade)
+  messages EmailMessage[]
+
+  @@unique([officeId, email])
+  @@index([officeId])
+}
+
+model EmailThread {
+  id            String   @id @default(cuid())
+  officeId      String
+  jobId         String?
+  inquiryId     String?
+  subject       String
+  participants  String   // JSON array of email addresses
+  lastMessageAt DateTime @default(now())
+  messageCount  Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  office   Office         @relation(fields: [officeId], references: [id], onDelete: Cascade)
+  job      Job?           @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  inquiry  Inquiry?       @relation(fields: [inquiryId], references: [id], onDelete: SetNull)
+  messages EmailMessage[]
+
+  @@index([officeId, jobId])
+  @@index([officeId, inquiryId])
+  @@index([officeId, lastMessageAt])
+}
+
+model EmailMessage {
+  id         String         @id @default(cuid())
+  threadId   String
+  accountId  String?
+  externalId String?        // provider message-id for dedup
+  direction  EmailDirection
+  fromEmail  String
+  fromName   String?
+  toEmails   String         // JSON array
+  ccEmails   String?        // JSON array
+  subject    String?
+  bodyText   String?
+  bodyHtml   String?
+  attachments String?       // JSON array {name, url, mimeType, size}
+  sentAt     DateTime       @default(now())
+  isRead     Boolean        @default(false)
+  createdAt  DateTime       @default(now())
+
+  thread  EmailThread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  account EmailAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+
+  @@unique([externalId])
+  @@index([threadId, sentAt])
+  @@index([accountId, sentAt])
+}
