@@ -8,15 +8,16 @@ import { classifyInboundEmail } from "./email-classifier";
 import { autoCreateInquiryFromThread } from "./thread-actions";
 
 // Sync envelope: how many threads max we'll touch in one run, and how far back
-// to look on a first sync. Each thread is one Gmail API call regardless of how
-// many messages it contains, so we can be more generous than per-message limits.
-const THREAD_FETCH_LIMIT = 200;
+// to look. Each thread is one Gmail API call regardless of how many messages
+// it contains, so we can be generous. Message dedupe by externalId means
+// re-scanning old threads is cheap (one HEAD-style check each).
+const THREAD_FETCH_LIMIT = 500;
 const PAGE_SIZE = 100;
-const FIRST_SYNC_WINDOW = "newer_than:60d";
-// After sync, run AI auto-inquiry on this many freshly-touched unlinked threads
-// (oldest first so we don't starve older threads). Each call costs one Haiku
-// invocation, so cap it.
-const AUTO_INQUIRY_LIMIT = 20;
+// Always sweep at least the last year on every sync — users want their full
+// inbox visible, not just what arrived since last sync.
+const SYNC_WINDOW = "newer_than:365d";
+// After sync, run AI auto-inquiry on this many unlinked threads.
+const AUTO_INQUIRY_LIMIT = 60;
 
 type GmailMessage = {
   id: string;
@@ -119,14 +120,10 @@ export async function syncEmailAccount(accountId: string): Promise<
     return { error: e instanceof Error ? e.message : "token refresh failed" };
   }
 
-  // We fetch the THREADS that have any activity since lastSyncAt (or last 60d on
-  // first sync), and then fetch each thread in full so we capture every message
-  // — including older ones that arrived before we had this inbox connected.
-  const q = account.lastSyncAt
-    ? `after:${Math.floor(account.lastSyncAt.getTime() / 1000)}`
-    : FIRST_SYNC_WINDOW;
-
-  const threadIds = await listThreadIds(accessToken, q, THREAD_FETCH_LIMIT);
+  // Sweep the last year on every sync. Per-message dedupe by externalId means
+  // rescanning old threads is essentially free, and operators want their full
+  // inbox available, not just deltas since the previous sync.
+  const threadIds = await listThreadIds(accessToken, SYNC_WINDOW, THREAD_FETCH_LIMIT);
 
   let processed = 0;
   let created = 0;
