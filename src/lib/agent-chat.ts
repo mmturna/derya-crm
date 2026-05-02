@@ -4,6 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { revalidatePath } from "next/cache";
 import { requireSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { populateJobFromEmails } from "@/lib/job-populate";
 
 export type ChatMsg = { role: "user" | "assistant"; content: string };
 
@@ -21,9 +22,23 @@ Your job:
 - Be terse, professional, and operational. No emojis. No markdown headers. Plain prose, max 150 words unless asked for detail.
 - If the user pastes what looks like an inbound freight RFQ email (multi-paragraph, has shipping context like origin/destination/mode/weight or words like "shipment", "container", "FCL", "LCL", "ETD", "ETA", "freight"), you should NOT analyze it inline — instead reply with a single sentence confirming you'll ingest it (the system will create an Inquiry separately).
 - For all other questions, ground your answer in the OPS CONTEXT provided.
-- Never fabricate a job or RFQ that's not in the context.`;
+- Never fabricate a job or RFQ that's not in the context.
+- When the user is focused on a job and asks you to populate, fill, extract, or create load details / specs / fields from the linked emails — **do not ask follow-up questions about weight, port, etc.** The system intercepts that intent and runs an extraction over every linked email automatically. You will only see the resulting fields, not the original ask. If a user asks something where extraction would help and you don't have enough context to answer, suggest they ask "extract load details from the emails".`;
 
 const RFQ_KEYWORDS = /\b(FCL|LCL|RFQ|quote|shipment|container|ETD|ETA|freight|cargo|BL|TEU|shipping|Incoterms|EXW|FOB|DAP|DDP|forwarder|carrier|ocean|airfreight|trucking)\b/i;
+
+function looksLikePopulateIntent(text: string): boolean {
+  const t = text.toLowerCase();
+  // verbs that mean "do it"
+  const verb = /\b(populate|fill|extract|create|derive|generate|build|set|update|complete|read)\b/.test(t);
+  // nouns referring to the job's structured fields
+  const noun = /\b(load\s*detail|shipment\s*detail|job\s*detail|details|specs|fields|the\s*load|the\s*job|origin|destination|route|incoterms|weight|volume|commodity)\b/.test(t);
+  // "from emails / based on emails / from the thread / from messages"
+  const source = /\b(email|emails|thread|threads|message|messages|inbox|conversation|the\s*messages)\b/.test(t);
+  // direct asks
+  const direct = /\b(populate the load|fill (in|out) the (load|job)|create the load|extract the (specs|fields|details)|read the emails)\b/.test(t);
+  return direct || (verb && noun) || (verb && source);
+}
 
 function looksLikeRFQ(text: string): boolean {
   if (text.length < 80) return false;
@@ -163,6 +178,22 @@ export async function chatWithAgent(history: ChatMsg[], userMessage: string, sco
     return {
       reply: `Captured RFQ "${subject}" in the inbox. AI parsing didn't return clean JSON — open the RFQ to fill fields manually.`,
       ingestedInquiryId: inquiry.id,
+    };
+  }
+
+  // Branch 1.5: When focused on a specific job, detect "populate / fill / extract
+  // load details from emails" intent and execute it directly. The agent has no
+  // tool-use loop yet, so we intercept the common ask.
+  if (scopeJobId && looksLikePopulateIntent(userMessage)) {
+    const r = await populateJobFromEmails(scopeJobId);
+    if ("error" in r) {
+      return { reply: `Couldn't populate the load: ${r.error}` };
+    }
+    if (r.filled.length === 0) {
+      return { reply: `Read the linked emails. Nothing new to fill — every field on this job already has a value, or the emails don't contain extractable shipment details. Open the job to edit fields manually.` };
+    }
+    return {
+      reply: `Populated load details from emails:\n${r.filled.map((f) => `· ${f}`).join("\n")}\n\nOpen the job to review or override any field.`,
     };
   }
 

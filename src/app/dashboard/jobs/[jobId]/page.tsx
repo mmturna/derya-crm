@@ -8,6 +8,7 @@ import {
   addQuoteLine,
 } from "./actions";
 import { Icon } from "@/components/icon";
+import { PopulateJobButton } from "@/components/populate-job-button";
 
 const STATUS_ORDER = ["INQUIRY", "QUOTED", "BOOKED", "IN_TRANSIT", "CUSTOMS", "DELIVERED"] as const;
 const STATUS_LABEL: Record<string, string> = {
@@ -222,17 +223,20 @@ export default async function JobDetailPage({
             </p>
           </div>
 
-          <form action={async (fd: FormData) => {
-            "use server";
-            await updateJobStatus(jobId, String(fd.get("status")));
-          }} style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-            <select name="status" defaultValue={job.status} style={{ fontSize: 13, fontWeight: 600, padding: "6px 10px" }}>
-              {STATUS_ORDER.map((s) => (
-                <option key={s} value={s}>{STATUS_LABEL[s]}</option>
-              ))}
-            </select>
-            <button className="btn btn-secondary btn-sm" type="submit">Update</button>
-          </form>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+            <PopulateJobButton jobId={jobId} />
+            <form action={async (fd: FormData) => {
+              "use server";
+              await updateJobStatus(jobId, String(fd.get("status")));
+            }} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <select name="status" defaultValue={job.status} style={{ fontSize: 13, fontWeight: 600, padding: "6px 10px" }}>
+                {STATUS_ORDER.map((s) => (
+                  <option key={s} value={s}>{STATUS_LABEL[s]}</option>
+                ))}
+              </select>
+              <button className="btn btn-secondary btn-sm" type="submit">Update</button>
+            </form>
+          </div>
         </div>
 
         {/* Status pipeline */}
