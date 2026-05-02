@@ -409,6 +409,7 @@ model Inquiry {
   volume        Float?
   incoterms     String?
   cargoReadyDate DateTime?
+  type          String   @default("FORWARDING") // FORWARDING (move customer's cargo) | SOURCING (find + buy a commodity for customer)
   status        String   @default("INGESTED") // INGESTED / PARSED / PRICED / QUOTED / WON / LOST
   rawEmailBody  String?
   parsedData    String?  // JSON: AI-extracted fields
@@ -487,6 +488,7 @@ model Job {
 
   reference        String    // e.g. JOB-2025-001
   status           JobStatus @default(INQUIRY)
+  type             String    @default("FORWARDING")  // FORWARDING | SOURCING
   mode             String?   // AIR / SEA-FCL / SEA-LCL / ROAD / COURIER
   origin           String?
   destination      String?
