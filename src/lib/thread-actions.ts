@@ -2,7 +2,6 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { revalidatePath } from "next/cache";
-import { redirect } from "next/navigation";
 import { requireSession } from "./auth";
 import { prisma } from "./prisma";
 
@@ -111,6 +110,204 @@ Be conservative — null is better than guessing. If a thread has BOTH sourcing 
   revalidatePath("/dashboard/rfq");
   revalidatePath("/dashboard/inbox");
   return { ok: true, inquiryId: inquiry.id };
+}
+
+// Auto-version: same as createInquiryFromThread, but lets the AI return
+// `{ skip: true, reason: "..." }` if the thread isn't freight-related, and
+// records an attempt so we don't keep re-asking on every sync. Used by the
+// post-sync auto-link pass — silent on failure, no redirects, no auth check
+// (caller must have already verified office ownership of the thread).
+export async function autoCreateInquiryFromThread(threadId: string): Promise<
+  | { ok: true; created: false; reason: string }
+  | { ok: true; created: true; inquiryId: string }
+  | { ok: true; created: false; linkedInquiryId: string }
+  | { ok: true; created: false; linkedJobId: string }
+  | { error: string }
+> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { error: "ANTHROPIC_API_KEY is not set" };
+
+  const thread = await prisma.emailThread.findUnique({
+    where: { id: threadId },
+    include: { messages: { orderBy: { sentAt: "asc" } } },
+  });
+  if (!thread) return { error: "Thread not found" };
+  if (thread.jobId || thread.inquiryId) {
+    await prisma.emailThread.update({ where: { id: threadId }, data: { autoLinkedAt: new Date() } });
+    return { ok: true, created: false, reason: "already linked" };
+  }
+  if (thread.messages.length === 0) return { error: "No messages in thread" };
+
+  // Pull open inquiries + active jobs in this office so the AI can match an
+  // existing record instead of creating a duplicate.
+  const [openInquiries, activeJobs] = await Promise.all([
+    prisma.inquiry.findMany({
+      where: { officeId: thread.officeId, status: { in: ["INGESTED", "PARSED", "PRICED", "QUOTED"] } },
+      select: { id: true, subject: true, type: true, fromEmail: true, fromCompany: true, commodity: true, origin: true, destination: true, mode: true, company: { select: { name: true } } },
+      orderBy: { receivedAt: "desc" },
+      take: 40,
+    }),
+    prisma.job.findMany({
+      where: { officeId: thread.officeId, status: { notIn: ["DELIVERED", "CANCELLED"] } },
+      select: { id: true, reference: true, type: true, origin: true, destination: true, mode: true, company: { select: { name: true } }, inquiry: { select: { fromEmail: true, commodity: true } } },
+      orderBy: { updatedAt: "desc" },
+      take: 40,
+    }),
+  ]);
+
+  const inquiryHints = openInquiries.map((i) =>
+    `${i.id} | ${i.type} | "${i.subject}" | ${i.fromEmail ?? i.fromCompany ?? "?"} | ${i.company?.name ?? "—"} | commodity: ${i.commodity ?? "—"} | ${i.origin ?? "?"} → ${i.destination ?? "?"} | ${i.mode ?? "—"}`
+  ).join("\n");
+  const jobHints = activeJobs.map((j) =>
+    `${j.id} | ${j.reference} | ${j.type} | ${j.company?.name ?? "—"} | ${j.inquiry?.fromEmail ?? "—"} | commodity: ${j.inquiry?.commodity ?? "—"} | ${j.origin ?? "?"} → ${j.destination ?? "?"} | ${j.mode ?? "—"}`
+  ).join("\n");
+
+  const transcript = thread.messages.map((m) => {
+    const dir = m.direction === "OUTBOUND" ? "[US OUT]" : "[INBOUND]";
+    return `${dir} ${m.sentAt.toISOString().split("T")[0]} · ${m.fromName ?? m.fromEmail}\nSubject: ${m.subject ?? "(none)"}\n\n${m.bodyText ?? ""}`.trim();
+  }).join("\n\n────\n\n");
+
+  const client = new Anthropic({ apiKey });
+  const result = await client.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 800,
+    system: `You are a freight forwarding office assistant. For an email thread, decide ONE of:
+
+(a) SKIP — thread is not freight-related (newsletter, security alert, calendar, banking, marketing, personal, generic platform notification):
+    { "action": "skip", "reason": "<short sentence>" }
+
+(b) LINK — thread is about a deal we ALREADY track in the lists below. Match by ANY of: same commodity (e.g. soybean meal threads → soybean meal inquiry), same sender/customer email or domain, same origin+destination route, same carrier+reference, or shared shipment ref. Prefer linking over creating a new record.
+    { "action": "link", "linkInquiryId": "<id>" | null, "linkJobId": "<id>" | null, "reason": "<short sentence>" }
+
+(c) CREATE — thread is freight-related but does NOT match any open inquiry/job. Extract a new inquiry:
+    { "action": "create", "type": "SOURCING" | "FORWARDING", "subject": string, "fromEmail": string|null, "fromCompany": string|null, "summary": string, "origin": string|null, "destination": string|null, "mode": "SEA-FCL"|"SEA-LCL"|"AIR"|"ROAD"|"COURIER"|null, "containerType": "20GP"|"40GP"|"40HC"|"LCL"|null, "incoterms": string|null, "commodity": string|null, "weight": number|null, "volume": number|null, "cargoReadyDate": string|null }
+
+SOURCING = office helps customer FIND/BUY a commodity (price-per-ton talk, contracts, samples).
+FORWARDING = office moves cargo customer already owns (carriers, BL, customs, ETA).
+
+Strong matching signals (any one is enough to LINK):
+- Same commodity keyword (soybean, wheat, container model, machinery type) appearing in both thread and an existing inquiry's commodity field.
+- Sender email matches an inquiry's fromEmail, OR sender domain matches the customer email domain on an inquiry.
+- Same carrier/booking reference number mentioned.
+
+Be conservative — null over guessing. Output ONLY the JSON object, no markdown.
+
+OPEN INQUIRIES (id | type | subject | sender | customer | commodity | route | mode):
+${inquiryHints || "(none)"}
+
+ACTIVE JOBS (id | ref | type | customer | source-email | commodity | route | mode):
+${jobHints || "(none)"}`,
+    messages: [{
+      role: "user",
+      content: `EMAIL THREAD (subject: "${thread.subject}", ${thread.messages.length} messages):\n\n${transcript.slice(0, 12000)}`,
+    }],
+  });
+
+  const text = result.content[0].type === "text" ? result.content[0].text : "";
+  const m = text.match(/\{[\s\S]*\}/);
+  if (!m) {
+    await prisma.emailThread.update({ where: { id: threadId }, data: { autoLinkedAt: new Date(), autoLinkSkipReason: "AI returned no JSON" } });
+    return { ok: true, created: false, reason: "AI returned no JSON" };
+  }
+  let parsed: any;
+  try { parsed = JSON.parse(m[0]); } catch {
+    await prisma.emailThread.update({ where: { id: threadId }, data: { autoLinkedAt: new Date(), autoLinkSkipReason: "AI JSON parse failed" } });
+    return { ok: true, created: false, reason: "JSON parse failed" };
+  }
+
+  // Back-compat: older prompt used `skip: true`.
+  const action: string = parsed.action ?? (parsed.skip ? "skip" : "create");
+
+  if (action === "skip") {
+    const reason = typeof parsed.reason === "string" ? parsed.reason.slice(0, 240) : "not freight related";
+    await prisma.emailThread.update({
+      where: { id: threadId },
+      data: { autoLinkedAt: new Date(), autoLinkSkipReason: reason },
+    });
+    return { ok: true, created: false, reason };
+  }
+
+  if (action === "link") {
+    const linkInquiryId = typeof parsed.linkInquiryId === "string" ? parsed.linkInquiryId : null;
+    const linkJobId = typeof parsed.linkJobId === "string" ? parsed.linkJobId : null;
+
+    // Verify the id exists in this office before linking.
+    if (linkInquiryId) {
+      const inq = await prisma.inquiry.findFirst({ where: { id: linkInquiryId, officeId: thread.officeId }, select: { id: true } });
+      if (inq) {
+        await prisma.emailThread.update({
+          where: { id: threadId },
+          data: { inquiryId: inq.id, autoLinkedAt: new Date() },
+        });
+        await prisma.emailMessage.updateMany({
+          where: { threadId, direction: "INBOUND", OR: [{ classification: null }, { classification: "OTHER" }] },
+          data: { classification: "RELATED_NOTE", classificationReason: "Auto-linked to existing inquiry", classificationAt: new Date() },
+        });
+        return { ok: true, created: false, linkedInquiryId: inq.id };
+      }
+    }
+    if (linkJobId) {
+      const job = await prisma.job.findFirst({ where: { id: linkJobId, officeId: thread.officeId }, select: { id: true } });
+      if (job) {
+        await prisma.emailThread.update({
+          where: { id: threadId },
+          data: { jobId: job.id, autoLinkedAt: new Date() },
+        });
+        await prisma.emailMessage.updateMany({
+          where: { threadId, direction: "INBOUND", OR: [{ classification: null }, { classification: "OTHER" }] },
+          data: { classification: "RELATED_NOTE", classificationReason: "Auto-linked to existing job", classificationAt: new Date() },
+        });
+        return { ok: true, created: false, linkedJobId: job.id };
+      }
+    }
+    // AI said link but didn't give a valid id — fall through to skip.
+    await prisma.emailThread.update({
+      where: { id: threadId },
+      data: { autoLinkedAt: new Date(), autoLinkSkipReason: "AI proposed link but id not found" },
+    });
+    return { ok: true, created: false, reason: "AI proposed link but id not found" };
+  }
+
+  // CREATE path
+  const rawBody = thread.messages.map((mm) =>
+    `--- ${mm.direction} from ${mm.fromEmail} on ${mm.sentAt.toISOString().split("T")[0]} ---\n${mm.bodyText ?? ""}`
+  ).join("\n\n").slice(0, 20000);
+
+  const inquiry = await prisma.inquiry.create({
+    data: {
+      officeId: thread.officeId,
+      subject: parsed.subject ?? thread.subject ?? "Email thread",
+      fromEmail: parsed.fromEmail ?? thread.messages.find((x) => x.direction === "INBOUND")?.fromEmail ?? null,
+      fromCompany: parsed.fromCompany ?? thread.messages.find((x) => x.direction === "INBOUND")?.fromName ?? null,
+      type: parsed.type === "SOURCING" ? "SOURCING" : "FORWARDING",
+      status: "PARSED",
+      rawEmailBody: rawBody,
+      parsedData: JSON.stringify({ ...parsed, source: "thread-auto", threadId }),
+      origin: parsed.origin ?? null,
+      destination: parsed.destination ?? null,
+      mode: parsed.mode ?? null,
+      containerType: parsed.containerType ?? null,
+      incoterms: parsed.incoterms ?? null,
+      commodity: parsed.commodity ?? null,
+      weight: parsed.weight != null ? Number(parsed.weight) : null,
+      volume: parsed.volume != null ? Number(parsed.volume) : null,
+      cargoReadyDate: parsed.cargoReadyDate ? new Date(parsed.cargoReadyDate) : null,
+      notes: parsed.summary ?? null,
+      receivedAt: thread.messages[0].sentAt,
+    },
+  });
+
+  await prisma.emailThread.update({
+    where: { id: threadId },
+    data: { inquiryId: inquiry.id, autoLinkedAt: new Date() },
+  });
+
+  await prisma.emailMessage.updateMany({
+    where: { threadId, direction: "INBOUND", OR: [{ classification: null }, { classification: "OTHER" }] },
+    data: { classification: "RELATED_NOTE", classificationReason: "Attached when thread was auto-promoted to Inquiry", classificationAt: new Date() },
+  });
+
+  return { ok: true, created: true, inquiryId: inquiry.id };
 }
 
 export async function attachThreadToJob(threadId: string, jobId: string): Promise<void> {

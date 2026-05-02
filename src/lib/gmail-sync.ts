@@ -5,11 +5,19 @@ import { prisma } from "./prisma";
 import { requireSession } from "./auth";
 import { getValidAccessToken } from "./gmail-oauth";
 import { classifyInboundEmail } from "./email-classifier";
+import { autoCreateInquiryFromThread } from "./thread-actions";
 
-const FETCH_LIMIT = 25; // per sync
-const PER_PAGE = 25;
+// Sync envelope: how many threads max we'll touch in one run, and how far back
+// to look on a first sync. Each thread is one Gmail API call regardless of how
+// many messages it contains, so we can be more generous than per-message limits.
+const THREAD_FETCH_LIMIT = 200;
+const PAGE_SIZE = 100;
+const FIRST_SYNC_WINDOW = "newer_than:60d";
+// After sync, run AI auto-inquiry on this many freshly-touched unlinked threads
+// (oldest first so we don't starve older threads). Each call costs one Haiku
+// invocation, so cap it.
+const AUTO_INQUIRY_LIMIT = 20;
 
-type GmailMessageMeta = { id: string; threadId: string };
 type GmailMessage = {
   id: string;
   threadId: string;
@@ -21,6 +29,7 @@ type GmailMessage = {
     mimeType?: string;
   };
 };
+type GmailThread = { id: string; messages?: GmailMessage[] };
 
 function header(headers: { name: string; value: string }[], name: string): string | null {
   const h = headers.find((h) => h.name.toLowerCase() === name.toLowerCase());
@@ -42,15 +51,42 @@ function extractPlainBody(payload: GmailMessage["payload"]): string {
       if (t) return t;
     }
   }
-  // Fallback to HTML stripped
   if (payload.mimeType === "text/html" && payload.body?.data) {
     return decodeBase64Url(payload.body.data).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   }
   return "";
 }
 
-// Sync the most recent N messages for a given account.
-export async function syncEmailAccount(accountId: string): Promise<{ ok: true; processed: number; created: number } | { error: string }> {
+async function listThreadIds(accessToken: string, q: string, max: number): Promise<string[]> {
+  const ids: string[] = [];
+  let pageToken: string | undefined;
+  while (ids.length < max) {
+    const url = new URL("https://gmail.googleapis.com/gmail/v1/users/me/threads");
+    url.searchParams.set("q", q);
+    url.searchParams.set("maxResults", String(Math.min(PAGE_SIZE, max - ids.length)));
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!res.ok) break;
+    const json: { threads?: { id: string }[]; nextPageToken?: string } = await res.json();
+    for (const t of json.threads ?? []) ids.push(t.id);
+    if (!json.nextPageToken || (json.threads ?? []).length === 0) break;
+    pageToken = json.nextPageToken;
+  }
+  return ids;
+}
+
+async function fetchThread(accessToken: string, threadId: string): Promise<GmailThread | null> {
+  const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=full`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) return null;
+  return (await res.json()) as GmailThread;
+}
+
+export async function syncEmailAccount(accountId: string): Promise<
+  | { ok: true; processed: number; created: number; threadsTouched: number; autoInquiries: number; autoLinked: number }
+  | { error: string }
+> {
   const session = await requireSession();
   const account = await prisma.emailAccount.findFirst({
     where: { id: accountId, officeId: session.officeId },
@@ -65,201 +101,169 @@ export async function syncEmailAccount(accountId: string): Promise<{ ok: true; p
     return { error: e instanceof Error ? e.message : "token refresh failed" };
   }
 
-  // Fetch most recent message IDs (after lastSyncAt if set)
-  // Gmail "after:" query takes a unix timestamp in seconds.
-  const afterParam = account.lastSyncAt
+  // We fetch the THREADS that have any activity since lastSyncAt (or last 60d on
+  // first sync), and then fetch each thread in full so we capture every message
+  // — including older ones that arrived before we had this inbox connected.
+  const q = account.lastSyncAt
     ? `after:${Math.floor(account.lastSyncAt.getTime() / 1000)}`
-    : "newer_than:7d"; // first sync = last 7 days
-  const listUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
-  listUrl.searchParams.set("q", afterParam);
-  listUrl.searchParams.set("maxResults", String(PER_PAGE));
+    : FIRST_SYNC_WINDOW;
 
-  const listRes = await fetch(listUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
-  if (!listRes.ok) {
-    const t = await listRes.text();
-    return { error: `Gmail list failed: ${listRes.status} ${t.slice(0, 200)}` };
-  }
-  const listJson: { messages?: GmailMessageMeta[] } = await listRes.json();
-  const ids = (listJson.messages ?? []).slice(0, FETCH_LIMIT).map((m) => m.id);
+  const threadIds = await listThreadIds(accessToken, q, THREAD_FETCH_LIMIT);
 
   let processed = 0;
   let created = 0;
+  const touchedThreadDbIds: string[] = [];
 
-  for (const id of ids) {
-    // Skip if already synced (dedupe by externalId)
-    const existing = await prisma.emailMessage.findUnique({ where: { externalId: id } });
-    if (existing) continue;
+  for (const tid of threadIds) {
+    const thread = await fetchThread(accessToken, tid);
+    if (!thread || !thread.messages || thread.messages.length === 0) continue;
 
-    const msgRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
+    // Find or stub our local EmailThread for this Gmail thread.
+    let localThread = await prisma.emailThread.findFirst({
+      where: { officeId: account.officeId, externalThreadId: tid },
     });
-    if (!msgRes.ok) continue;
-    const msg: GmailMessage = await msgRes.json();
-    processed++;
 
-    const headers = msg.payload.headers;
-    const fromRaw = header(headers, "From") ?? "";
-    const subject = header(headers, "Subject") ?? "(no subject)";
-    const dateStr = header(headers, "Date");
-    const messageId = header(headers, "Message-ID");
-    const inReplyTo = header(headers, "In-Reply-To");
-    const references = header(headers, "References");
-    const toRaw = header(headers, "To") ?? "";
-    const sentAt = dateStr ? new Date(dateStr) : new Date(parseInt(msg.internalDate));
+    // Sort messages chronologically.
+    const messages = [...thread.messages].sort(
+      (a, b) => parseInt(a.internalDate) - parseInt(b.internalDate)
+    );
 
-    // Parse "Name <email@x>" or just "email@x"
-    const fromMatch = fromRaw.match(/<([^>]+)>/) ?? fromRaw.match(/([\w.+-]+@[\w.-]+\.[A-Za-z]{2,})/);
-    const fromEmail = fromMatch ? fromMatch[1] : fromRaw;
-    const fromName = fromRaw.includes("<") ? fromRaw.split("<")[0].trim().replace(/^"|"$/g, "") : null;
+    for (const msg of messages) {
+      const headers = msg.payload.headers;
+      const fromRaw = header(headers, "From") ?? "";
+      const subject = header(headers, "Subject") ?? "(no subject)";
+      const dateStr = header(headers, "Date");
+      const messageIdHdr = header(headers, "Message-ID");
+      const toRaw = header(headers, "To") ?? "";
+      const sentAt = dateStr ? new Date(dateStr) : new Date(parseInt(msg.internalDate));
 
-    // Determine inbound vs outbound (sender is the connected account itself = outbound)
-    const direction = fromEmail.toLowerCase() === account.email.toLowerCase() ? "OUTBOUND" : "INBOUND";
+      const externalId = messageIdHdr ?? msg.id;
 
-    const body = extractPlainBody(msg.payload);
-
-    // Try to find existing thread by In-Reply-To / References / Subject
-    let threadId: string | null = null;
-
-    if (inReplyTo) {
-      const parent = await prisma.emailMessage.findFirst({
-        where: { externalId: inReplyTo },
-        select: { threadId: true },
-      });
-      if (parent) threadId = parent.threadId;
-    }
-    if (!threadId && references) {
-      const refIds = references.split(/\s+/).filter(Boolean);
-      const parent = await prisma.emailMessage.findFirst({
-        where: { externalId: { in: refIds } },
-        select: { threadId: true },
-      });
-      if (parent) threadId = parent.threadId;
-    }
-    if (!threadId) {
-      // Match by normalized subject (strip Re:/Fwd:)
-      const normSubject = subject.replace(/^\s*(Re|Fwd|FW|RE|FWD):\s*/gi, "").trim();
-      if (normSubject) {
-        const t = await prisma.emailThread.findFirst({
-          where: { officeId: account.officeId, subject: { contains: normSubject } },
-          orderBy: { lastMessageAt: "desc" },
-        });
-        if (t) threadId = t.id;
-      }
-    }
-
-    // Inbound classification (if no thread match yet)
-    let attachJobId: string | null = null;
-    let attachInquiryId: string | null = null;
-    let classificationLabel: string | null = null;
-    let classificationReason: string | null = null;
-    if (direction === "INBOUND" && !threadId) {
-      try {
-        const cls = await classifyInboundEmail({
-          subject, fromEmail, bodyText: body, officeId: account.officeId,
-        });
-        classificationLabel = cls.kind;
-        classificationReason = cls.reason;
-        if (cls.kind === "RFQ" && cls.parsed) {
-          // Create new Inquiry
-          const inq = await prisma.inquiry.create({
-            data: {
-              officeId: account.officeId,
-              subject,
-              fromEmail,
-              fromCompany: fromName,
-              status: "PARSED",
-              rawEmailBody: body.slice(0, 10000),
-              parsedData: JSON.stringify(cls.parsed),
-              origin: cls.parsed.origin ?? null,
-              destination: cls.parsed.destination ?? null,
-              mode: cls.parsed.mode ?? null,
-              containerType: cls.parsed.containerType ?? null,
-              incoterms: cls.parsed.incoterms ?? null,
-              commodity: cls.parsed.commodity ?? null,
-              weight: cls.parsed.weight ?? null,
-              volume: cls.parsed.volume ?? null,
-              cargoReadyDate: cls.parsed.cargoReadyDate ? new Date(cls.parsed.cargoReadyDate) : null,
-              receivedAt: sentAt,
-            },
-          });
-          attachInquiryId = inq.id;
-        } else if (cls.kind === "CARRIER_REPLY" && cls.matchInquiryId) {
-          attachInquiryId = cls.matchInquiryId;
-          // If rate fields present, upsert a CarrierQuote
-          if (cls.rate?.carrier) {
-            const existing = await prisma.carrierQuote.findFirst({
-              where: { inquiryId: cls.matchInquiryId, carrier: cls.rate.carrier },
+      // Skip if already in DB.
+      const existing = await prisma.emailMessage.findUnique({ where: { externalId } });
+      if (existing) {
+        // If we don't have a local thread yet, adopt from existing message.
+        if (!localThread) {
+          localThread = await prisma.emailThread.findUnique({ where: { id: existing.threadId } });
+          // Backfill externalThreadId so future syncs map directly.
+          if (localThread && !localThread.externalThreadId) {
+            await prisma.emailThread.update({
+              where: { id: localThread.id },
+              data: { externalThreadId: tid },
             });
-            const data = {
-              total20: cls.rate.total20 ?? null,
-              total40: cls.rate.total40 ?? null,
-              total40HC: cls.rate.total40HC ?? null,
-              transitDays: cls.rate.transitDays ?? null,
-              service: cls.rate.service ?? null,
-              validity: cls.rate.validity ?? null,
-              status: "RECEIVED",
-            };
-            if (existing) {
-              await prisma.carrierQuote.update({ where: { id: existing.id }, data });
-            } else {
-              await prisma.carrierQuote.create({
-                data: { inquiryId: cls.matchInquiryId, carrier: cls.rate.carrier, ...data },
-              });
-            }
-            await prisma.inquiry.update({
-              where: { id: cls.matchInquiryId },
-              data: { status: "PRICED" },
-            });
+            localThread.externalThreadId = tid;
           }
-        } else if ((cls.kind === "CUSTOMER_REPLY" || cls.kind === "RELATED_NOTE") && cls.matchJobId) {
-          attachJobId = cls.matchJobId;
-        } else if (cls.kind === "RELATED_NOTE" && cls.matchInquiryId) {
-          attachInquiryId = cls.matchInquiryId;
         }
-      } catch {
-        // classification failed; just store as plain message
+        continue;
       }
-    }
+      processed++;
 
-    // Create / find thread
-    let finalThreadId = threadId;
-    if (!finalThreadId) {
-      const thread = await prisma.emailThread.create({
+      const fromMatch = fromRaw.match(/<([^>]+)>/) ?? fromRaw.match(/([\w.+-]+@[\w.-]+\.[A-Za-z]{2,})/);
+      const fromEmail = fromMatch ? fromMatch[1] : fromRaw;
+      const fromName = fromRaw.includes("<") ? fromRaw.split("<")[0].trim().replace(/^"|"$/g, "") : null;
+      const direction = fromEmail.toLowerCase() === account.email.toLowerCase() ? "OUTBOUND" : "INBOUND";
+      const body = extractPlainBody(msg.payload);
+
+      // Per-message classification (lightweight; AI may match an existing job/inquiry).
+      let classificationLabel: string | null = null;
+      let classificationReason: string | null = null;
+      let classifiedMatchJobId: string | null = null;
+      let classifiedMatchInquiryId: string | null = null;
+      if (direction === "INBOUND") {
+        try {
+          const cls = await classifyInboundEmail({
+            subject, fromEmail, bodyText: body, officeId: account.officeId,
+          });
+          classificationLabel = cls.kind;
+          classificationReason = cls.reason;
+          if (cls.matchJobId) classifiedMatchJobId = cls.matchJobId;
+          if (cls.matchInquiryId) classifiedMatchInquiryId = cls.matchInquiryId;
+        } catch {
+          // ignore — message still gets stored
+        }
+      }
+
+      // Create the thread on first inserted message.
+      if (!localThread) {
+        localThread = await prisma.emailThread.create({
+          data: {
+            officeId: account.officeId,
+            subject,
+            participants: JSON.stringify([fromEmail, account.email]),
+            externalThreadId: tid,
+            jobId: classifiedMatchJobId,
+            inquiryId: classifiedMatchInquiryId,
+            lastMessageAt: sentAt,
+          },
+        });
+      } else if (!localThread.jobId && !localThread.inquiryId && (classifiedMatchJobId || classifiedMatchInquiryId)) {
+        // Adopt link from this message if the thread isn't yet linked.
+        await prisma.emailThread.update({
+          where: { id: localThread.id },
+          data: { jobId: classifiedMatchJobId, inquiryId: classifiedMatchInquiryId },
+        });
+        localThread.jobId = classifiedMatchJobId;
+        localThread.inquiryId = classifiedMatchInquiryId;
+      }
+
+      await prisma.emailMessage.create({
         data: {
-          officeId: account.officeId,
+          threadId: localThread.id,
+          accountId: account.id,
+          externalId,
+          direction,
+          fromEmail,
+          fromName,
+          toEmails: JSON.stringify(toRaw ? [toRaw] : []),
           subject,
-          participants: JSON.stringify([fromEmail, account.email]),
-          jobId: attachJobId,
-          inquiryId: attachInquiryId,
-          lastMessageAt: sentAt,
+          bodyText: body.slice(0, 50000),
+          sentAt,
+          classification: classificationLabel,
+          classificationReason,
+          classificationAt: classificationLabel ? new Date() : null,
         },
       });
-      finalThreadId = thread.id;
+      await prisma.emailThread.update({
+        where: { id: localThread.id },
+        data: { lastMessageAt: sentAt, messageCount: { increment: 1 } },
+      });
+      created++;
     }
 
-    // Create the message
-    await prisma.emailMessage.create({
-      data: {
-        threadId: finalThreadId,
-        accountId: account.id,
-        externalId: messageId ?? id,
-        direction,
-        fromEmail,
-        fromName,
-        toEmails: JSON.stringify(toRaw ? [toRaw] : []),
-        subject,
-        bodyText: body.slice(0, 50000),
-        sentAt,
-        classification: classificationLabel,
-        classificationReason,
-        classificationAt: classificationLabel ? new Date() : null,
-      },
-    });
-    await prisma.emailThread.update({
-      where: { id: finalThreadId },
-      data: { lastMessageAt: sentAt, messageCount: { increment: 1 } },
-    });
-    created++;
+    if (localThread && !touchedThreadDbIds.includes(localThread.id)) {
+      touchedThreadDbIds.push(localThread.id);
+    }
+  }
+
+  // ── Auto-create Inquiries for unlinked freight-related threads ─────────────
+  // After sync, walk the unlinked threads in this office and let AI synthesize
+  // an Inquiry for each one that looks freight-related. Skips and remembers
+  // non-freight threads so we don't re-ask on every sync.
+  const unlinked = await prisma.emailThread.findMany({
+    where: {
+      officeId: account.officeId,
+      jobId: null,
+      inquiryId: null,
+      autoLinkedAt: null,
+      messages: { some: { direction: "INBOUND" } },
+    },
+    orderBy: { lastMessageAt: "desc" },
+    take: AUTO_INQUIRY_LIMIT,
+    select: { id: true },
+  });
+
+  let autoInquiries = 0;
+  let autoLinked = 0;
+  for (const t of unlinked) {
+    try {
+      const r = await autoCreateInquiryFromThread(t.id);
+      if ("ok" in r) {
+        if (r.created) autoInquiries++;
+        else if ("linkedInquiryId" in r || "linkedJobId" in r) autoLinked++;
+      }
+    } catch {
+      // best-effort
+    }
   }
 
   await prisma.emailAccount.update({
@@ -269,8 +273,16 @@ export async function syncEmailAccount(accountId: string): Promise<{ ok: true; p
 
   revalidatePath("/dashboard");
   revalidatePath("/dashboard/rfq");
+  revalidatePath("/dashboard/inbox");
   revalidatePath("/dashboard/settings/email");
-  return { ok: true, processed, created };
+  return {
+    ok: true,
+    processed,
+    created,
+    threadsTouched: touchedThreadDbIds.length,
+    autoInquiries,
+    autoLinked,
+  };
 }
 
 export async function disconnectEmailAccount(accountId: string): Promise<void> {
@@ -283,11 +295,9 @@ export async function disconnectEmailAccount(accountId: string): Promise<void> {
 }
 
 // Re-run classification over already-synced messages.
-// Useful after schema/classifier changes, or when new jobs/inquiries exist that
-// could now be matched to older emails.
-export async function reclassifyMessages(args: { onlyUnclassified?: boolean; limit?: number } = {}): Promise<{ ok: true; processed: number; relinked: number } | { error: string }> {
+export async function reclassifyMessages(args: { onlyUnclassified?: boolean; limit?: number } = {}): Promise<{ ok: true; processed: number; relinked: number; autoInquiries: number } | { error: string }> {
   const session = await requireSession();
-  const limit = args.limit ?? 50;
+  const limit = args.limit ?? 100;
 
   const where: any = {
     direction: "INBOUND",
@@ -316,7 +326,6 @@ export async function reclassifyMessages(args: { onlyUnclassified?: boolean; lim
       });
       processed++;
 
-      // Update the message with the new classification + reason
       await prisma.emailMessage.update({
         where: { id: m.id },
         data: {
@@ -326,7 +335,6 @@ export async function reclassifyMessages(args: { onlyUnclassified?: boolean; lim
         },
       });
 
-      // If a job/inquiry match is found and the thread isn't yet linked, link it
       if (m.thread && !m.thread.jobId && !m.thread.inquiryId) {
         if (cls.matchJobId) {
           await prisma.emailThread.update({
@@ -340,34 +348,6 @@ export async function reclassifyMessages(args: { onlyUnclassified?: boolean; lim
             data: { inquiryId: cls.matchInquiryId },
           });
           relinked++;
-        } else if (cls.kind === "RFQ" && cls.parsed) {
-          // Promote: create a fresh Inquiry from this email and link the thread to it
-          const inq = await prisma.inquiry.create({
-            data: {
-              officeId: session.officeId,
-              subject: m.subject ?? "(no subject)",
-              fromEmail: m.fromEmail,
-              fromCompany: m.fromName,
-              status: "PARSED",
-              rawEmailBody: (m.bodyText ?? "").slice(0, 10000),
-              parsedData: JSON.stringify(cls.parsed),
-              origin: cls.parsed.origin ?? null,
-              destination: cls.parsed.destination ?? null,
-              mode: cls.parsed.mode ?? null,
-              containerType: cls.parsed.containerType ?? null,
-              incoterms: cls.parsed.incoterms ?? null,
-              commodity: cls.parsed.commodity ?? null,
-              weight: cls.parsed.weight ?? null,
-              volume: cls.parsed.volume ?? null,
-              cargoReadyDate: cls.parsed.cargoReadyDate ? new Date(cls.parsed.cargoReadyDate) : null,
-              receivedAt: m.sentAt,
-            },
-          });
-          await prisma.emailThread.update({
-            where: { id: m.thread.id },
-            data: { inquiryId: inq.id },
-          });
-          relinked++;
         }
       }
     } catch {
@@ -375,8 +355,42 @@ export async function reclassifyMessages(args: { onlyUnclassified?: boolean; lim
     }
   }
 
+  // After reclassification, retry the auto-link/auto-inquiry pass on ALL
+  // unlinked threads — including ones we previously skipped — so newly-created
+  // inquiries get a chance to claim related threads (e.g. once a soybean
+  // sourcing inquiry exists, the older soybean emails should now link to it).
+  // Clear prior skip markers so the AI runs fresh.
+  await prisma.emailThread.updateMany({
+    where: { officeId: session.officeId, jobId: null, inquiryId: null },
+    data: { autoLinkedAt: null, autoLinkSkipReason: null },
+  });
+  const unlinked = await prisma.emailThread.findMany({
+    where: {
+      officeId: session.officeId,
+      jobId: null,
+      inquiryId: null,
+      messages: { some: { direction: "INBOUND" } },
+    },
+    orderBy: { lastMessageAt: "desc" },
+    take: 40,
+    select: { id: true },
+  });
+  let autoInquiries = 0;
+  let autoLinked = 0;
+  for (const t of unlinked) {
+    try {
+      const r = await autoCreateInquiryFromThread(t.id);
+      if ("ok" in r) {
+        if (r.created) autoInquiries++;
+        else if ("linkedInquiryId" in r || "linkedJobId" in r) autoLinked++;
+      }
+    } catch {
+      // best-effort
+    }
+  }
+
   revalidatePath("/dashboard/inbox");
   revalidatePath("/dashboard/rfq");
   revalidatePath("/dashboard");
-  return { ok: true, processed, relinked };
+  return { ok: true, processed, relinked: relinked + autoLinked, autoInquiries };
 }

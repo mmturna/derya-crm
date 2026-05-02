@@ -16,7 +16,11 @@ export function SyncAccountButton({ accountId }: { accountId: string }) {
       if ("error" in res) {
         setMsg(res.error);
       } else {
-        setMsg(`+${res.created} new (of ${res.processed} fetched)`);
+        const ai = [
+          res.autoInquiries > 0 ? `+${res.autoInquiries} inquiries` : null,
+          res.autoLinked > 0 ? `+${res.autoLinked} linked` : null,
+        ].filter(Boolean).join(" · ");
+        setMsg(`+${res.created} msgs · ${res.threadsTouched} threads${ai ? ` · ${ai}` : ""}`);
         router.refresh();
         setTimeout(() => setMsg(null), 4000);
       }

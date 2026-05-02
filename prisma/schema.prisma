@@ -577,16 +577,19 @@ model EmailAccount {
 }
 
 model EmailThread {
-  id            String   @id @default(cuid())
-  officeId      String
-  jobId         String?
-  inquiryId     String?
-  subject       String
-  participants  String   // JSON array of email addresses
-  lastMessageAt DateTime @default(now())
-  messageCount  Int      @default(0)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id               String   @id @default(cuid())
+  officeId         String
+  jobId            String?
+  inquiryId        String?
+  subject          String
+  participants     String   // JSON array of email addresses
+  externalThreadId String?  // provider thread id (Gmail threadId) for direct mapping on resync
+  autoLinkedAt     DateTime? // when we last attempted auto-link / auto-inquiry
+  autoLinkSkipReason String? // why AI decided not to auto-create an inquiry (e.g. "not freight related")
+  lastMessageAt    DateTime @default(now())
+  messageCount     Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   office   Office         @relation(fields: [officeId], references: [id], onDelete: Cascade)
   job      Job?           @relation(fields: [jobId], references: [id], onDelete: SetNull)
@@ -596,6 +599,7 @@ model EmailThread {
   @@index([officeId, jobId])
   @@index([officeId, inquiryId])
   @@index([officeId, lastMessageAt])
+  @@index([officeId, externalThreadId])
 }
 
 model EmailMessage {

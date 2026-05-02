@@ -16,7 +16,8 @@ export function ReclassifyButton({ onlyUnclassified = false }: { onlyUnclassifie
       if ("error" in res) {
         setMsg(res.error);
       } else {
-        setMsg(`Re-classified ${res.processed} · ${res.relinked} newly linked to a load`);
+        const ai = res.autoInquiries > 0 ? ` · +${res.autoInquiries} new inquiries` : "";
+        setMsg(`Re-classified ${res.processed} · ${res.relinked} re-linked${ai}`);
         router.refresh();
         setTimeout(() => setMsg(null), 6000);
       }
