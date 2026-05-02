@@ -2,7 +2,7 @@ import crypto from "crypto";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
-import { verifyPassword } from "@/lib/password";
+import { verifyPassword, hashPassword } from "@/lib/password";
 
 const SESSION_COOKIE = "crm_session";
 const ONE_DAY = 60 * 60 * 24;
@@ -92,6 +92,77 @@ export async function loginWithCredentials(email: string, password: string) {
   });
 
   return { userId: user.id, officeId: user.officeId, role: user.role, canViewWholeOffice: user.canViewWholeOffice };
+}
+
+export async function signupWithCredentials(args: {
+  email: string;
+  password: string;
+  fullName: string;
+  officeName: string;
+}): Promise<
+  | { ok: true; userId: string; officeId: string }
+  | { ok: false; error: string }
+> {
+  const email = args.email.trim().toLowerCase();
+  const password = args.password;
+  const fullName = args.fullName.trim();
+  const officeName = args.officeName.trim();
+
+  if (!email || !password || !fullName || !officeName) {
+    return { ok: false, error: "All fields are required." };
+  }
+  if (password.length < 8) {
+    return { ok: false, error: "Password must be at least 8 characters." };
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return { ok: false, error: "That doesn't look like a valid email." };
+  }
+
+  // Reject if any active user already has this email anywhere.
+  const existing = await prisma.user.findFirst({ where: { email, isActive: true } });
+  if (existing) {
+    return { ok: false, error: "An account with that email already exists. Try signing in." };
+  }
+
+  const passwordHash = await hashPassword(password);
+
+  // Create office + first admin user in a transaction
+  const result = await prisma.$transaction(async (tx) => {
+    const office = await tx.office.create({
+      data: { name: officeName },
+    });
+    const user = await tx.user.create({
+      data: {
+        officeId: office.id,
+        email,
+        passwordHash,
+        fullName,
+        role: "ADMIN",
+        isActive: true,
+        canViewWholeOffice: true,
+      },
+    });
+    return { office, user };
+  });
+
+  // Issue session immediately
+  const token = encodeSession({
+    userId: result.user.id,
+    officeId: result.office.id,
+    email: result.user.email,
+    role: result.user.role,
+    canViewWholeOffice: result.user.canViewWholeOffice,
+  });
+  const cookieStore = await cookies();
+  cookieStore.set(SESSION_COOKIE, token, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: ONE_DAY * 7,
+  });
+
+  return { ok: true, userId: result.user.id, officeId: result.office.id };
 }
 
 export async function logout() {

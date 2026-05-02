@@ -2,7 +2,7 @@ import { redirect } from "next/navigation";
 import { getSession, loginWithCredentials } from "@/lib/auth";
 
 type Params = {
-  searchParams: Promise<{ error?: string }>;
+  searchParams: Promise<{ error?: string; demo?: string }>;
 };
 
 export default async function LoginPage({ searchParams }: Params) {
@@ -13,6 +13,7 @@ export default async function LoginPage({ searchParams }: Params) {
 
   const query = await searchParams;
   const hasError = query.error === "1";
+  const demoMode = query.demo === "1";
 
   async function loginAction(formData: FormData) {
     "use server";
@@ -32,8 +33,8 @@ export default async function LoginPage({ searchParams }: Params) {
       <div className="login-card">
         <div className="login-header">
           <div className="login-logo">D</div>
-          <h1 className="login-title">Derya CRM</h1>
-          <p className="login-subtitle">Freight Sales Workspace — sign in to continue</p>
+          <h1 className="login-title">Derya Freight OS</h1>
+          <p className="login-subtitle">Sign in to your office</p>
         </div>
 
         <div className="login-body">
@@ -50,8 +51,9 @@ export default async function LoginPage({ searchParams }: Params) {
                 name="email"
                 type="email"
                 required
-                defaultValue="admin@demo.local"
-                placeholder="you@company.com"
+                defaultValue={demoMode ? "admin@demo.local" : ""}
+                placeholder="you@yourcompany.com"
+                autoComplete="email"
               />
             </label>
             <label className="field">
@@ -60,8 +62,9 @@ export default async function LoginPage({ searchParams }: Params) {
                 name="password"
                 type="password"
                 required
-                defaultValue="admin1234"
+                defaultValue={demoMode ? "admin1234" : ""}
                 placeholder="••••••••"
+                autoComplete="current-password"
               />
             </label>
             <button type="submit" style={{ marginTop: 4, padding: "10px 14px", fontSize: 14 }}>
@@ -69,9 +72,15 @@ export default async function LoginPage({ searchParams }: Params) {
             </button>
           </form>
 
-          <p style={{ marginTop: 16, fontSize: 12, color: "var(--text-3)", textAlign: "center" }}>
-            Demo: admin@demo.local / admin1234
-          </p>
+          <div style={{ marginTop: 18, paddingTop: 16, borderTop: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 8, alignItems: "center" }}>
+            <p style={{ fontSize: 12, color: "var(--text-3)", margin: 0 }}>
+              Don&apos;t have an account? <a href="/signup" style={{ color: "var(--brand)", fontWeight: 600 }}>Create your office</a>
+            </p>
+            <p style={{ fontSize: 11, color: "var(--text-3)", margin: 0 }}>
+              Or <a href="/login?demo=1" style={{ color: "var(--text-2)", fontWeight: 500 }}>try the demo</a>
+              {" "}— prefills <code style={{ fontSize: 10, background: "var(--surface-3)", padding: "1px 4px", borderRadius: 3 }}>admin@demo.local / admin1234</code>
+            </p>
+          </div>
         </div>
       </div>
     </main>
