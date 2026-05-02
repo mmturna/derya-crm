@@ -151,13 +151,15 @@ export async function syncEmailAccount(accountId: string): Promise<{ ok: true; p
     let attachJobId: string | null = null;
     let attachInquiryId: string | null = null;
     let classificationLabel: string | null = null;
+    let classificationReason: string | null = null;
     if (direction === "INBOUND" && !threadId) {
       try {
         const cls = await classifyInboundEmail({
           subject, fromEmail, bodyText: body, officeId: account.officeId,
         });
         classificationLabel = cls.kind;
-        if (cls.kind === "RFQ") {
+        classificationReason = cls.reason;
+        if (cls.kind === "RFQ" && cls.parsed) {
           // Create new Inquiry
           const inq = await prisma.inquiry.create({
             data: {
@@ -184,34 +186,35 @@ export async function syncEmailAccount(accountId: string): Promise<{ ok: true; p
         } else if (cls.kind === "CARRIER_REPLY" && cls.matchInquiryId) {
           attachInquiryId = cls.matchInquiryId;
           // If rate fields present, upsert a CarrierQuote
-          if (cls.parsed.carrier) {
+          if (cls.rate?.carrier) {
             const existing = await prisma.carrierQuote.findFirst({
-              where: { inquiryId: cls.matchInquiryId, carrier: cls.parsed.carrier },
+              where: { inquiryId: cls.matchInquiryId, carrier: cls.rate.carrier },
             });
             const data = {
-              total20: cls.parsed.total20 ?? null,
-              total40: cls.parsed.total40 ?? null,
-              total40HC: cls.parsed.total40HC ?? null,
-              transitDays: cls.parsed.transitDays ?? null,
-              service: cls.parsed.service ?? null,
-              validity: cls.parsed.validity ?? null,
+              total20: cls.rate.total20 ?? null,
+              total40: cls.rate.total40 ?? null,
+              total40HC: cls.rate.total40HC ?? null,
+              transitDays: cls.rate.transitDays ?? null,
+              service: cls.rate.service ?? null,
+              validity: cls.rate.validity ?? null,
               status: "RECEIVED",
             };
             if (existing) {
               await prisma.carrierQuote.update({ where: { id: existing.id }, data });
             } else {
               await prisma.carrierQuote.create({
-                data: { inquiryId: cls.matchInquiryId, carrier: cls.parsed.carrier, ...data },
+                data: { inquiryId: cls.matchInquiryId, carrier: cls.rate.carrier, ...data },
               });
             }
-            // Bump inquiry status to PRICED
             await prisma.inquiry.update({
               where: { id: cls.matchInquiryId },
               data: { status: "PRICED" },
             });
           }
-        } else if (cls.kind === "CUSTOMER_REPLY" && cls.matchJobId) {
+        } else if ((cls.kind === "CUSTOMER_REPLY" || cls.kind === "RELATED_NOTE") && cls.matchJobId) {
           attachJobId = cls.matchJobId;
+        } else if (cls.kind === "RELATED_NOTE" && cls.matchInquiryId) {
+          attachInquiryId = cls.matchInquiryId;
         }
       } catch {
         // classification failed; just store as plain message
@@ -248,6 +251,8 @@ export async function syncEmailAccount(accountId: string): Promise<{ ok: true; p
         bodyText: body.slice(0, 50000),
         sentAt,
         classification: classificationLabel,
+        classificationReason,
+        classificationAt: classificationLabel ? new Date() : null,
       },
     });
     await prisma.emailThread.update({
@@ -275,4 +280,103 @@ export async function disconnectEmailAccount(accountId: string): Promise<void> {
     data: { isActive: false },
   });
   revalidatePath("/dashboard/settings/email");
+}
+
+// Re-run classification over already-synced messages.
+// Useful after schema/classifier changes, or when new jobs/inquiries exist that
+// could now be matched to older emails.
+export async function reclassifyMessages(args: { onlyUnclassified?: boolean; limit?: number } = {}): Promise<{ ok: true; processed: number; relinked: number } | { error: string }> {
+  const session = await requireSession();
+  const limit = args.limit ?? 50;
+
+  const where: any = {
+    direction: "INBOUND",
+    account: { officeId: session.officeId },
+  };
+  if (args.onlyUnclassified) where.classification = null;
+
+  const messages = await prisma.emailMessage.findMany({
+    where,
+    include: { thread: true },
+    orderBy: { sentAt: "desc" },
+    take: limit,
+  });
+
+  let processed = 0;
+  let relinked = 0;
+
+  for (const m of messages) {
+    if (!m.bodyText && !m.subject) continue;
+    try {
+      const cls = await classifyInboundEmail({
+        subject: m.subject ?? "",
+        fromEmail: m.fromEmail,
+        bodyText: m.bodyText ?? "",
+        officeId: session.officeId,
+      });
+      processed++;
+
+      // Update the message with the new classification + reason
+      await prisma.emailMessage.update({
+        where: { id: m.id },
+        data: {
+          classification: cls.kind,
+          classificationReason: cls.reason,
+          classificationAt: new Date(),
+        },
+      });
+
+      // If a job/inquiry match is found and the thread isn't yet linked, link it
+      if (m.thread && !m.thread.jobId && !m.thread.inquiryId) {
+        if (cls.matchJobId) {
+          await prisma.emailThread.update({
+            where: { id: m.thread.id },
+            data: { jobId: cls.matchJobId },
+          });
+          relinked++;
+        } else if (cls.matchInquiryId) {
+          await prisma.emailThread.update({
+            where: { id: m.thread.id },
+            data: { inquiryId: cls.matchInquiryId },
+          });
+          relinked++;
+        } else if (cls.kind === "RFQ" && cls.parsed) {
+          // Promote: create a fresh Inquiry from this email and link the thread to it
+          const inq = await prisma.inquiry.create({
+            data: {
+              officeId: session.officeId,
+              subject: m.subject ?? "(no subject)",
+              fromEmail: m.fromEmail,
+              fromCompany: m.fromName,
+              status: "PARSED",
+              rawEmailBody: (m.bodyText ?? "").slice(0, 10000),
+              parsedData: JSON.stringify(cls.parsed),
+              origin: cls.parsed.origin ?? null,
+              destination: cls.parsed.destination ?? null,
+              mode: cls.parsed.mode ?? null,
+              containerType: cls.parsed.containerType ?? null,
+              incoterms: cls.parsed.incoterms ?? null,
+              commodity: cls.parsed.commodity ?? null,
+              weight: cls.parsed.weight ?? null,
+              volume: cls.parsed.volume ?? null,
+              cargoReadyDate: cls.parsed.cargoReadyDate ? new Date(cls.parsed.cargoReadyDate) : null,
+              receivedAt: m.sentAt,
+            },
+          });
+          await prisma.emailThread.update({
+            where: { id: m.thread.id },
+            data: { inquiryId: inq.id },
+          });
+          relinked++;
+        }
+      }
+    } catch {
+      // skip on error, keep going
+    }
+  }
+
+  revalidatePath("/dashboard/inbox");
+  revalidatePath("/dashboard/rfq");
+  revalidatePath("/dashboard");
+  return { ok: true, processed, relinked };
 }

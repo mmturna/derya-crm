@@ -1,22 +1,26 @@
 import { requireSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { Icon } from "@/components/icon";
+import { ReclassifyButton } from "@/components/reclassify-button";
 
 const FILTERS = [
-  { key: "",                label: "All",           color: "var(--text-2)" },
-  { key: "RFQ",             label: "RFQs",          color: "var(--brand)" },
-  { key: "CARRIER_REPLY",   label: "Carrier reply", color: "var(--brand)" },
-  { key: "CUSTOMER_REPLY",  label: "Customer reply", color: "var(--brand)" },
-  { key: "OTHER",           label: "Other",         color: "var(--text-3)" },
-  { key: "OUTBOUND",        label: "Sent",          color: "var(--text-2)" },
+  { key: "",                label: "All" },
+  { key: "RFQ",             label: "RFQs" },
+  { key: "CARRIER_REPLY",   label: "Carrier reply" },
+  { key: "CUSTOMER_REPLY",  label: "Customer reply" },
+  { key: "RELATED_NOTE",    label: "Related" },
+  { key: "OTHER",           label: "Other" },
+  { key: "OUTBOUND",        label: "Sent" },
+  { key: "_UNCLASSIFIED",   label: "Unclassified" },
 ] as const;
 
 const KIND_COLOR: Record<string, { fg: string; bg: string; bd: string; label: string }> = {
   RFQ:             { fg: "var(--brand)",   bg: "var(--brand-light)",  bd: "var(--brand-border)",  label: "RFQ" },
-  CARRIER_REPLY:   { fg: "#0e7490",        bg: "#ecfeff",             bd: "#a5f3fc",              label: "Carrier reply" },
-  CUSTOMER_REPLY:  { fg: "#7c2d12",        bg: "#fff7ed",             bd: "#fed7aa",              label: "Customer reply" },
+  CARRIER_REPLY:   { fg: "var(--brand)",   bg: "var(--brand-light)",  bd: "var(--brand-border)",  label: "Carrier reply" },
+  CUSTOMER_REPLY:  { fg: "var(--brand)",   bg: "var(--brand-light)",  bd: "var(--brand-border)",  label: "Customer reply" },
+  RELATED_NOTE:    { fg: "var(--text)",    bg: "var(--surface-3)",    bd: "var(--border-strong)", label: "Related" },
   OTHER:           { fg: "var(--text-3)",  bg: "var(--surface-3)",    bd: "var(--border)",        label: "Other" },
   OUTBOUND:        { fg: "var(--text-2)",  bg: "var(--surface-2)",    bd: "var(--border)",        label: "Sent" },
+  UNCLASSIFIED:    { fg: "var(--danger)",  bg: "var(--danger-bg)",    bd: "var(--danger-border)", label: "Unclassified" },
 };
 
 function timeAgo(d: Date) {
@@ -50,6 +54,9 @@ export default async function InboxPage({
   if (accountFilter) where.accountId = accountFilter;
   if (filter === "OUTBOUND") {
     where.direction = "OUTBOUND";
+  } else if (filter === "_UNCLASSIFIED") {
+    where.direction = "INBOUND";
+    where.classification = null;
   } else if (filter) {
     where.direction = "INBOUND";
     where.classification = filter;
@@ -75,6 +82,7 @@ export default async function InboxPage({
   function countFor(key: string): number {
     if (!key) return counts.reduce((s, c) => s + c._count, 0);
     if (key === "OUTBOUND") return counts.filter((c) => c.direction === "OUTBOUND").reduce((s, c) => s + c._count, 0);
+    if (key === "_UNCLASSIFIED") return counts.filter((c) => c.direction === "INBOUND" && c.classification === null).reduce((s, c) => s + c._count, 0);
     return counts.filter((c) => c.direction === "INBOUND" && c.classification === key).reduce((s, c) => s + c._count, 0);
   }
 
@@ -89,9 +97,12 @@ export default async function InboxPage({
             All synced emails from your connected inboxes. Each inbound message gets an AI classification — RFQs become Inquiries, carrier replies update CarrierQuote, customer replies attach to job threads.
           </p>
         </div>
-        <a href="/dashboard/settings/email" className="btn btn-secondary" style={{ fontSize: 13, textDecoration: "none" }}>
-          Manage inboxes
-        </a>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ReclassifyButton onlyUnclassified={false} />
+          <a href="/dashboard/settings/email" className="btn btn-secondary" style={{ fontSize: 13, textDecoration: "none" }}>
+            Manage inboxes
+          </a>
+        </div>
       </div>
 
       {/* Account filter */}
@@ -169,7 +180,7 @@ export default async function InboxPage({
       ) : (
         <div className="card" style={{ overflow: "hidden" }}>
           {messages.map((m, i) => {
-            const kind = m.direction === "OUTBOUND" ? "OUTBOUND" : (m.classification ?? "OTHER");
+            const kind = m.direction === "OUTBOUND" ? "OUTBOUND" : (m.classification ?? "UNCLASSIFIED");
             const meta = KIND_COLOR[kind] ?? KIND_COLOR.OTHER;
             const linkedJob = m.thread?.job;
             const linkedInquiry = m.thread?.inquiry;
@@ -215,6 +226,11 @@ export default async function InboxPage({
                   {m.bodyText && (
                     <div style={{ fontSize: 11.5, color: "var(--text-3)", lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
                       {m.bodyText.slice(0, 280).replace(/\s+/g, " ").trim()}
+                    </div>
+                  )}
+                  {m.classificationReason && (
+                    <div style={{ fontSize: 10.5, color: "var(--text-2)", marginTop: 6, fontStyle: "italic" }}>
+                      AI: {m.classificationReason}
                     </div>
                   )}
                   {detailHref && (

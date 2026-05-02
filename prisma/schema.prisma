@@ -612,7 +612,9 @@ model EmailMessage {
   attachments String?       // JSON array {name, url, mimeType, size}
   sentAt     DateTime       @default(now())
   isRead     Boolean        @default(false)
-  classification String?    // RFQ | CARRIER_REPLY | CUSTOMER_REPLY | OTHER (set by AI on inbound)
+  classification     String?  // RFQ | CARRIER_REPLY | CUSTOMER_REPLY | RELATED_NOTE | OTHER (set by AI on inbound)
+  classificationReason String?  // one-line AI explanation
+  classificationAt   DateTime?  // when the classifier last ran
   createdAt  DateTime       @default(now())
 
   thread  EmailThread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
