@@ -4,6 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { revalidatePath } from "next/cache";
 import { prisma } from "./prisma";
 import { requireSession } from "./auth";
+import { ensureProposedJobsForOpenInquiries } from "./job-actions";
 
 // AI-driven consolidation of duplicate Inquiries (and their PROPOSED jobs).
 // Used when the inbox has many separate threads that all describe the same
@@ -123,6 +124,9 @@ Rules:
     const noteAppend = `\n\n[Auto-merged ${losers.length} duplicate inquir${losers.length === 1 ? "y" : "ies"} on ${new Date().toISOString().split("T")[0]}: ${cluster.reason ?? "AI-detected duplicate"}]`;
     await prisma.$executeRaw`UPDATE "Inquiry" SET "notes" = COALESCE("notes", '') || ${noteAppend} WHERE "id" = ${keeper.id}`;
   }
+
+  // After merging, backfill PROPOSED jobs for keepers that lost theirs.
+  await ensureProposedJobsForOpenInquiries(session.officeId);
 
   revalidatePath("/dashboard/rfq");
   revalidatePath("/dashboard/inbox");

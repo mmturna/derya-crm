@@ -6,6 +6,7 @@ import { requireSession } from "./auth";
 import { getValidAccessToken } from "./gmail-oauth";
 import { classifyInboundEmail } from "./email-classifier";
 import { autoCreateInquiryFromThread } from "./thread-actions";
+import { ensureProposedJobsForOpenInquiries } from "./job-actions";
 
 // Sync envelope: how many threads max we'll touch in one run, and how far back
 // to look. Each thread is one Gmail API call regardless of how many messages
@@ -284,6 +285,9 @@ export async function syncEmailAccount(accountId: string): Promise<
     }
   }
 
+  // Backfill PROPOSED jobs for any open inquiry that doesn't have one yet.
+  await ensureProposedJobsForOpenInquiries(account.officeId);
+
   await prisma.emailAccount.update({
     where: { id: accountId },
     data: { lastSyncAt: new Date() },
@@ -292,6 +296,7 @@ export async function syncEmailAccount(accountId: string): Promise<
   revalidatePath("/dashboard");
   revalidatePath("/dashboard/rfq");
   revalidatePath("/dashboard/inbox");
+  revalidatePath("/dashboard/jobs");
   revalidatePath("/dashboard/settings/email");
   return {
     ok: true,
@@ -407,8 +412,12 @@ export async function reclassifyMessages(args: { onlyUnclassified?: boolean; lim
     }
   }
 
+  // Backfill any open inquiry without a Job.
+  await ensureProposedJobsForOpenInquiries(session.officeId);
+
   revalidatePath("/dashboard/inbox");
   revalidatePath("/dashboard/rfq");
   revalidatePath("/dashboard");
+  revalidatePath("/dashboard/jobs");
   return { ok: true, processed, relinked: relinked + autoLinked, autoInquiries };
 }

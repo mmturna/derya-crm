@@ -43,6 +43,27 @@ export async function createProposedJobForInquiry(inquiryId: string): Promise<st
   return job.id;
 }
 
+// For every open Inquiry in this office that doesn't have a Job yet, create a
+// PROPOSED-stage Job. Idempotent: skips inquiries that already have a job.
+// Used by sync / reclassify / merge so existing inquiries always show up on
+// the kanban board, even ones created before the PROPOSED-job feature existed.
+export async function ensureProposedJobsForOpenInquiries(officeId: string): Promise<number> {
+  const inquiries = await prisma.inquiry.findMany({
+    where: {
+      officeId,
+      status: { in: ["INGESTED", "PARSED", "PRICED", "QUOTED"] },
+      job: null,
+    },
+    select: { id: true },
+  });
+  let created = 0;
+  for (const i of inquiries) {
+    const id = await createProposedJobForInquiry(i.id);
+    if (id) created++;
+  }
+  return created;
+}
+
 // Promote a PROPOSED job to a real INQUIRY-stage job (operator confirms it).
 export async function confirmProposedJob(jobId: string): Promise<{ ok: true } | { error: string }> {
   const session = await requireSession();
