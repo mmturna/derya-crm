@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { requireSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { populateJobFromEmails } from "@/lib/job-populate";
+import { mergeAllOpenInquiriesIntoOne, consolidateDuplicateInquiries } from "@/lib/merge-actions";
 
 export type ChatMsg = { role: "user" | "assistant"; content: string };
 
@@ -23,9 +24,38 @@ Your job:
 - If the user pastes what looks like an inbound freight RFQ email (multi-paragraph, has shipping context like origin/destination/mode/weight or words like "shipment", "container", "FCL", "LCL", "ETD", "ETA", "freight"), you should NOT analyze it inline — instead reply with a single sentence confirming you'll ingest it (the system will create an Inquiry separately).
 - For all other questions, ground your answer in the OPS CONTEXT provided.
 - Never fabricate a job or RFQ that's not in the context.
-- When the user is focused on a job and asks you to populate, fill, extract, or create load details / specs / fields from the linked emails — **do not ask follow-up questions about weight, port, etc.** The system intercepts that intent and runs an extraction over every linked email automatically. You will only see the resulting fields, not the original ask. If a user asks something where extraction would help and you don't have enough context to answer, suggest they ask "extract load details from the emails".`;
+- When the user is focused on a job and asks you to populate, fill, extract, or create load details / specs / fields from the linked emails — **do not ask follow-up questions about weight, port, etc.** The system intercepts that intent and runs an extraction over every linked email automatically. You will only see the resulting fields, not the original ask. If a user asks something where extraction would help and you don't have enough context to answer, suggest they ask "extract load details from the emails".
+- You CAN take real actions in the platform. Specifically you can:
+    1. Consolidate / categorize / merge / group multiple RFQs into ONE procurement (or forwarding) job — when the user says things like "merge all into one", "consolidate the soybean and corn gluten under one procurement", "categorize everything under one job", "group these RFQs", you can do it. The system intercepts that intent and runs the merge automatically.
+    2. Find and dedupe duplicate inquiries: "merge duplicates", "find duplicates".
+    3. Populate a job's load details from its linked emails (when scoped to a job).
+  Never tell the user you "can't create / can't merge / it's a workflow they need to do manually" — these actions exist. If the request is ambiguous, run the action you think is closest and report what changed.`;
 
 const RFQ_KEYWORDS = /\b(FCL|LCL|RFQ|quote|shipment|container|ETD|ETA|freight|cargo|BL|TEU|shipping|Incoterms|EXW|FOB|DAP|DDP|forwarder|carrier|ocean|airfreight|trucking)\b/i;
+
+function detectMergeIntent(text: string): { kind: "all-into-one" | "dedup" | "none"; type?: "SOURCING" | "FORWARDING" } {
+  const t = text.toLowerCase();
+  // SOURCING vs FORWARDING filter
+  let type: "SOURCING" | "FORWARDING" | undefined;
+  if (/\b(procurement|sourcing|buying|purchase|supplier)\b/.test(t)) type = "SOURCING";
+  else if (/\b(forwarding|shipping|freight|logistics)\b/.test(t)) type = "FORWARDING";
+
+  // "merge all / consolidate all / group all / categorize all / X under one / into one job"
+  const allIntoOne =
+    /\b(merge|consolidate|group|categorize|combine|unify|bundle|put|gather)\s+(all|every|the|these|those)\b/.test(t) ||
+    /\b(under|into|to)\s+(one|a single|a)\s+(procurement|forwarding|sourcing|job|deal|rfq)\b/.test(t) ||
+    /\bone\s+(big|single|consolidated)\s+(procurement|forwarding|sourcing|job)\b/.test(t) ||
+    /\bcategorize\b.*\b(all|together|under)\b/.test(t);
+
+  // "merge duplicates / dedup"
+  const dedup =
+    /\b(merge|consolidate|dedup|deduplicate|remove)\s+(duplicate|dupe|repeat)/.test(t) ||
+    /\bfind\s+duplicates\b/.test(t);
+
+  if (allIntoOne) return { kind: "all-into-one", type };
+  if (dedup) return { kind: "dedup", type };
+  return { kind: "none" };
+}
 
 function looksLikePopulateIntent(text: string): boolean {
   const t = text.toLowerCase();
@@ -179,6 +209,25 @@ export async function chatWithAgent(history: ChatMsg[], userMessage: string, sco
       reply: `Captured RFQ "${subject}" in the inbox. AI parsing didn't return clean JSON — open the RFQ to fill fields manually.`,
       ingestedInquiryId: inquiry.id,
     };
+  }
+
+  // Branch 1.4: Detect merge/consolidate intents before generic chat. These run
+  // even when not scoped to a specific job — they operate across the office.
+  const merge = detectMergeIntent(userMessage);
+  if (merge.kind === "all-into-one") {
+    const r = await mergeAllOpenInquiriesIntoOne({ type: merge.type });
+    if ("error" in r) return { reply: `Couldn't consolidate: ${r.error}` };
+    if (r.mergedCount === 0) return { reply: `Nothing to consolidate — only one open ${merge.type ?? ""} inquiry exists.` };
+    const linkBit = r.keeperJobId ? ` Open it on the jobs board.` : "";
+    return {
+      reply: `Consolidated ${r.mergedCount + 1} ${merge.type ?? "open"} inquiries into one: "${r.subject}".${linkBit} You can split it back if any RFQ doesn't belong.`,
+    };
+  }
+  if (merge.kind === "dedup") {
+    const r = await consolidateDuplicateInquiries();
+    if ("error" in r) return { reply: `Couldn't dedupe: ${r.error}` };
+    if (r.merged === 0) return { reply: `No duplicates found across your open inquiries.` };
+    return { reply: `Merged ${r.merged} duplicate inquiries into ${r.clusters} cleaned-up deal${r.clusters === 1 ? "" : "s"}.` };
   }
 
   // Branch 1.5: When focused on a specific job, detect "populate / fill / extract

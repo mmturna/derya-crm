@@ -133,3 +133,148 @@ Rules:
   revalidatePath("/dashboard/jobs");
   return { ok: true, clusters: clusterCount, merged: mergedCount };
 }
+
+// Operator-directed: consolidate ALL open inquiries (optionally filtered by
+// type) into ONE big procurement/forwarding job. Used when the user has a
+// bunch of related-but-not-identical RFQs (soybean meal, corn gluten,
+// cottonseed cake, fish meal — all animal feed sourcing for one buyer) and
+// wants to manage them as a single job rather than N separate ones.
+//
+// Strategy: keep the inquiry with the most attached email threads (richest
+// context), move every other inquiry's threads onto it, regenerate the
+// subject + commodity using AI, delete sibling inquiries + their PROPOSED
+// jobs. CONFIRMED jobs are NEVER auto-merged.
+export async function mergeAllOpenInquiriesIntoOne(args: {
+  type?: "SOURCING" | "FORWARDING";
+} = {}): Promise<
+  | { ok: true; mergedCount: number; keeperInquiryId: string; keeperJobId: string | null; subject: string }
+  | { error: string }
+> {
+  const session = await requireSession();
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { error: "ANTHROPIC_API_KEY is not set" };
+
+  const where: {
+    officeId: string;
+    status: { in: string[] };
+    type?: string;
+    job: { is: { status: string } } | null;
+  } = {
+    officeId: session.officeId,
+    status: { in: ["INGESTED", "PARSED", "PRICED", "QUOTED"] },
+    // Only consider inquiries whose linked job is still PROPOSED (or has no
+    // job yet). Confirmed jobs are real work and shouldn't be merged.
+    job: null,
+  };
+  if (args.type) where.type = args.type;
+
+  // Find all candidates (job is null OR job.status = PROPOSED).
+  const candidates = await prisma.inquiry.findMany({
+    where: {
+      officeId: session.officeId,
+      status: { in: ["INGESTED", "PARSED", "PRICED", "QUOTED"] },
+      ...(args.type ? { type: args.type } : {}),
+      OR: [
+        { job: null },
+        { job: { is: { status: "PROPOSED" } } },
+      ],
+    },
+    include: {
+      _count: { select: { emailThreads: true } },
+      job: { select: { id: true, status: true } },
+    },
+    orderBy: { createdAt: "asc" },
+  });
+
+  if (candidates.length < 2) return { error: "Need at least 2 mergeable inquiries — none or only one open." };
+
+  // Keeper = the one with the most attached email threads (richest context).
+  // Tiebreak by oldest.
+  candidates.sort((a, b) => {
+    if (b._count.emailThreads !== a._count.emailThreads) return b._count.emailThreads - a._count.emailThreads;
+    return a.createdAt.getTime() - b.createdAt.getTime();
+  });
+  const keeper = candidates[0];
+  const losers = candidates.slice(1);
+
+  // AI generates a new subject + commodity that summarizes the consolidated deal.
+  const summaryInput = candidates.map((c) =>
+    `- "${c.subject}" | commodity: ${c.commodity ?? "—"} | from: ${c.fromEmail ?? c.fromCompany ?? "—"} | route: ${c.origin ?? "?"} → ${c.destination ?? "?"}`
+  ).join("\n");
+
+  const client = new Anthropic({ apiKey });
+  const result = await client.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 250,
+    system: `You write a single concise subject line for a consolidated procurement/forwarding job that merges multiple related RFQs.
+
+Output ONLY this JSON (no markdown):
+{ "subject": string, "commodity": string }
+
+The subject should be short (under 80 chars) and describe the umbrella deal — e.g. "Animal feed procurement (soybean meal, corn gluten, cottonseed cake, fish meal)" or "Multi-port European delivery — Q3 2026".
+The commodity field should be a comma-separated list of the underlying commodities or a generic category if they all fit one.`,
+    messages: [{
+      role: "user",
+      content: `Consolidating these ${candidates.length} inquiries into one ${args.type ?? "open"} job:\n\n${summaryInput}`,
+    }],
+  });
+  const txt = result.content[0].type === "text" ? result.content[0].text : "";
+  const m = txt.match(/\{[\s\S]*\}/);
+  let newSubject = keeper.subject;
+  let newCommodity = keeper.commodity;
+  if (m) {
+    try {
+      const j = JSON.parse(m[0]);
+      if (typeof j.subject === "string" && j.subject.trim()) newSubject = j.subject.trim().slice(0, 200);
+      if (typeof j.commodity === "string" && j.commodity.trim()) newCommodity = j.commodity.trim().slice(0, 200);
+    } catch { /* keep keeper's */ }
+  }
+
+  // Move every loser's threads onto the keeper, then delete the loser.
+  for (const loser of losers) {
+    await prisma.emailThread.updateMany({
+      where: { inquiryId: loser.id },
+      data: { inquiryId: keeper.id },
+    });
+    if (loser.job?.id) {
+      await prisma.job.delete({ where: { id: loser.job.id } }).catch(() => {});
+    }
+    await prisma.carrierQuote.deleteMany({ where: { inquiryId: loser.id } }).catch(() => {});
+    await prisma.inquiry.delete({ where: { id: loser.id } }).catch(() => {});
+  }
+
+  // Update the keeper with the merged subject + commodity, and append an audit note.
+  const auditNote = `\n\n[Auto-consolidated ${losers.length} inquiries on ${new Date().toISOString().split("T")[0]}: ${losers.map((l) => `"${l.subject}"`).join(", ")}]`;
+  await prisma.inquiry.update({
+    where: { id: keeper.id },
+    data: {
+      subject: newSubject,
+      commodity: newCommodity,
+    },
+  });
+  await prisma.$executeRaw`UPDATE "Inquiry" SET "notes" = COALESCE("notes", '') || ${auditNote} WHERE "id" = ${keeper.id}`;
+
+  // Backfill or fetch the keeper's PROPOSED job, and propagate the new subject/commodity.
+  await ensureProposedJobsForOpenInquiries(session.officeId);
+  const keeperJob = await prisma.job.findFirst({
+    where: { inquiryId: keeper.id },
+    select: { id: true, commodity: true },
+  });
+  if (keeperJob && (keeperJob.commodity == null || keeperJob.commodity === "")) {
+    await prisma.job.update({
+      where: { id: keeperJob.id },
+      data: { commodity: newCommodity },
+    });
+  }
+
+  revalidatePath("/dashboard/rfq");
+  revalidatePath("/dashboard/inbox");
+  revalidatePath("/dashboard/jobs");
+  return {
+    ok: true,
+    mergedCount: losers.length,
+    keeperInquiryId: keeper.id,
+    keeperJobId: keeperJob?.id ?? null,
+    subject: newSubject,
+  };
+}
