@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ReclassifyButton } from "@/components/reclassify-button";
 import { CreateInquiryButton } from "@/components/create-inquiry-button";
 import { ThreadAccordion } from "@/components/thread-accordion";
+import { MergeDuplicatesButton } from "@/components/merge-duplicates-button";
 
 const FILTERS = [
   { key: "",                label: "All threads" },
@@ -113,6 +114,7 @@ export default async function InboxPage({
           </p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <MergeDuplicatesButton />
           <ReclassifyButton onlyUnclassified={false} />
           <a href="/dashboard/settings/email" className="btn btn-secondary" style={{ fontSize: 13, textDecoration: "none" }}>
             Manage inboxes
