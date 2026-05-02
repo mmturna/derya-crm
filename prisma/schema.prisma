@@ -587,6 +587,8 @@ model EmailThread {
   externalThreadId String?  // provider thread id (Gmail threadId) for direct mapping on resync
   autoLinkedAt     DateTime? // when we last attempted auto-link / auto-inquiry
   autoLinkSkipReason String? // why AI decided not to auto-create an inquiry (e.g. "not freight related")
+  supplierOffer    String?  // JSON {supplierName, pricePerUnit, currency, unit, qtyAvailable, incoterms, paymentTerms, leadTime, validity, sampleAvailable, notes}
+  supplierOfferAt  DateTime? // when AI last extracted a supplier offer from this thread
   lastMessageAt    DateTime @default(now())
   messageCount     Int      @default(0)
   createdAt        DateTime @default(now())

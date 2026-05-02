@@ -150,7 +150,7 @@ export async function autoCreateInquiryFromThread(threadId: string): Promise<
       where: { officeId: thread.officeId, status: { in: ["INGESTED", "PARSED", "PRICED", "QUOTED"] } },
       select: { id: true, subject: true, type: true, fromEmail: true, fromCompany: true, commodity: true, origin: true, destination: true, mode: true, company: { select: { name: true } } },
       orderBy: { receivedAt: "desc" },
-      take: 40,
+      take: 80,
     }),
     prisma.job.findMany({
       where: { officeId: thread.officeId, status: { notIn: ["DELIVERED", "CANCELLED"] } },
@@ -181,21 +181,29 @@ export async function autoCreateInquiryFromThread(threadId: string): Promise<
 (a) SKIP — thread is not freight-related (newsletter, security alert, calendar, banking, marketing, personal, generic platform notification):
     { "action": "skip", "reason": "<short sentence>" }
 
-(b) LINK — thread is about a deal we ALREADY track in the lists below. Match by ANY of: same commodity (e.g. soybean meal threads → soybean meal inquiry), same sender/customer email or domain, same origin+destination route, same carrier+reference, or shared shipment ref. Prefer linking over creating a new record.
-    { "action": "link", "linkInquiryId": "<id>" | null, "linkJobId": "<id>" | null, "reason": "<short sentence>" }
+(b) LINK — thread is about a deal we ALREADY track. **STRONGLY prefer linking over creating.** Multiple suppliers / multiple negotiations / multiple email threads about the SAME commodity-and-buyer typically belong to ONE deal. Examples:
+    - Five different "Re: Soybean Meal" threads from five different suppliers → ALL link to the SAME existing soybean inquiry.
+    - "Re: Quotation for Corn Gluten Meal" + "Corn Gluten Meal Sample" + "CGM lead time" → ALL link to one corn-gluten-meal sourcing inquiry.
+    - Carrier reply threads about the same booking → link to the existing job.
 
-(c) CREATE — thread is freight-related but does NOT match any open inquiry/job. Extract a new inquiry:
+  { "action": "link", "linkInquiryId": "<id>" | null, "linkJobId": "<id>" | null, "reason": "<short sentence>" }
+
+(c) CREATE — thread is freight-related and is genuinely a NEW commodity/route/buyer not represented in the lists. Only choose this when no candidate is plausible.
     { "action": "create", "type": "SOURCING" | "FORWARDING", "subject": string, "fromEmail": string|null, "fromCompany": string|null, "summary": string, "origin": string|null, "destination": string|null, "mode": "SEA-FCL"|"SEA-LCL"|"AIR"|"ROAD"|"COURIER"|null, "containerType": "20GP"|"40GP"|"40HC"|"LCL"|null, "incoterms": string|null, "commodity": string|null, "weight": number|null, "volume": number|null, "cargoReadyDate": string|null }
 
-SOURCING = office helps customer FIND/BUY a commodity (price-per-ton talk, contracts, samples).
+SOURCING = office helps customer FIND/BUY a commodity (price-per-ton talk, contracts, samples). For SOURCING, ONE inquiry usually has MANY supplier-conversation threads — link, don't duplicate.
 FORWARDING = office moves cargo customer already owns (carriers, BL, customs, ETA).
 
-Strong matching signals (any one is enough to LINK):
-- Same commodity keyword (soybean, wheat, container model, machinery type) appearing in both thread and an existing inquiry's commodity field.
-- Sender email matches an inquiry's fromEmail, OR sender domain matches the customer email domain on an inquiry.
-- Same carrier/booking reference number mentioned.
+Strong LINK signals (ANY one is enough — be aggressive):
+- The commodity keyword in the thread matches an existing inquiry's commodity field, even loosely (e.g. "soybean", "soybean meal", "SBM", "animal feed soybean" all match a "Soybean Meal" inquiry).
+- Sender email matches an inquiry's fromEmail OR sender domain matches the customer/contact domain on any open record.
+- Same origin or destination country combined with same commodity family.
+- Reply chains, Re:/Fwd: subject lines whose stem matches an existing subject.
+- Shared booking/BL/container reference number.
 
-Be conservative — null over guessing. Output ONLY the JSON object, no markdown.
+When in doubt between LINK and CREATE: choose LINK. Duplicate inquiries are worse than over-linking — the operator can split later.
+
+Output ONLY the JSON object, no markdown.
 
 OPEN INQUIRIES (id | type | subject | sender | customer | commodity | route | mode):
 ${inquiryHints || "(none)"}

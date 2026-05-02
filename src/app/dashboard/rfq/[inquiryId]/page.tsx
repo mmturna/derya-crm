@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireSession } from "@/lib/auth";
 import { convertToJob, updateInquiryField, updateInquiryStatus, parseRFQWithAI } from "./actions";
 import { Icon } from "@/components/icon";
+import { SourcingOffersTable } from "@/components/sourcing-offers-table";
 
 const STATUS_META: Record<string, { label: string; cls: string }> = {
   INGESTED: { label: "New",    cls: "badge-info" },
@@ -140,24 +141,75 @@ export default async function RFQDetailPage({
             </div>
           )}
 
+          {/* Sourcing comparison table — only for SOURCING inquiries */}
+          {inquiry.type === "SOURCING" && (
+            <SourcingOffersTable
+              inquiryId={inquiry.id}
+              rows={inquiry.emailThreads.map((t) => {
+                let offer: Record<string, unknown> | null = null;
+                if (t.supplierOffer) {
+                  try { offer = JSON.parse(t.supplierOffer); } catch { offer = null; }
+                }
+                const firstInbound = t.messages.find((m) => m.direction === "INBOUND");
+                return {
+                  threadId: t.id,
+                  threadSubject: t.subject,
+                  fromEmail: firstInbound?.fromEmail ?? null,
+                  lastMessageAt: t.lastMessageAt.toISOString(),
+                  offer: offer as never,
+                };
+              })}
+            />
+          )}
+
           {/* Email threads */}
           {inquiry.emailThreads.length > 0 && (
             <div className="email-thread">
               {inquiry.emailThreads.map((thread) =>
-                thread.messages.map((msg) => (
-                  <div key={msg.id} className={`email-bubble ${msg.direction === "INBOUND" ? "email-inbound" : ""}`}>
-                    <div className="email-bubble-header">
-                      <div>
-                        <div className="email-bubble-from">{msg.fromName ?? msg.fromEmail}</div>
-                        <div className="email-bubble-meta">{msg.fromEmail} · {msg.direction}</div>
+                thread.messages.map((msg) => {
+                  let attachments: { filename: string; mimeType: string; size: number; attachmentId: string }[] = [];
+                  if (msg.attachments) {
+                    try { attachments = JSON.parse(msg.attachments); } catch { attachments = []; }
+                  }
+                  return (
+                    <div key={msg.id} className={`email-bubble ${msg.direction === "INBOUND" ? "email-inbound" : ""}`}>
+                      <div className="email-bubble-header">
+                        <div>
+                          <div className="email-bubble-from">{msg.fromName ?? msg.fromEmail}</div>
+                          <div className="email-bubble-meta">{msg.fromEmail} · {msg.direction}</div>
+                        </div>
+                        <div style={{ fontSize: 12, color: "var(--text-3)" }}>
+                          {new Date(msg.sentAt).toLocaleString()}
+                        </div>
                       </div>
-                      <div style={{ fontSize: 12, color: "var(--text-3)" }}>
-                        {new Date(msg.sentAt).toLocaleString()}
-                      </div>
+                      <div className="email-bubble-body">{msg.bodyText ?? msg.bodyHtml ?? "—"}</div>
+                      {attachments.length > 0 && (
+                        <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px dashed var(--border)", display: "flex", flexWrap: "wrap", gap: 6 }}>
+                          {attachments.map((a) => (
+                            <a
+                              key={a.attachmentId}
+                              href={`/api/gmail/attachment?messageDbId=${msg.id}&attachmentId=${encodeURIComponent(a.attachmentId)}&filename=${encodeURIComponent(a.filename)}`}
+                              download={a.filename}
+                              style={{
+                                display: "inline-flex", alignItems: "center", gap: 6,
+                                padding: "4px 9px", borderRadius: 4,
+                                background: "var(--surface-2)", border: "1px solid var(--border)",
+                                fontSize: 11.5, color: "var(--text)", textDecoration: "none",
+                              }}
+                            >
+                              <Icon name="paperclip" size={11} />
+                              <span style={{ fontWeight: 500 }}>{a.filename}</span>
+                              <span style={{ color: "var(--text-3)" }}>
+                                {a.size < 1024 * 1024 ? `${(a.size / 1024).toFixed(1)} KB` : `${(a.size / 1024 / 1024).toFixed(1)} MB`}
+                              </span>
+                              <Icon name="download" size={11} />
+                            </a>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                    <div className="email-bubble-body">{msg.bodyText ?? msg.bodyHtml ?? "—"}</div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           )}
