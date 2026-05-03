@@ -20,17 +20,11 @@ export async function getGmailAuthUrl(): Promise<{ url: string; state: string }>
   const clientId = process.env.GOOGLE_CLIENT_ID;
   if (!clientId) throw new Error("GOOGLE_CLIENT_ID is not set");
 
-  // Random state, signed with auth secret to prevent CSRF
-  const nonce = crypto.randomBytes(16).toString("hex");
-  const state = `${session.officeId}.${nonce}`;
-  // Stash nonce in a cookie to verify on callback
-  const c = await cookies();
-  c.set("gmail-oauth-nonce", nonce, {
-    path: "/",
-    httpOnly: true,
-    sameSite: "lax",
-    maxAge: 600,
-  });
+  // Stateless HMAC-signed state token: officeId + issuedAt + signature.
+  // No cookie needed, so we don't lose state across OAuth redirects, sub-
+  // domains, or browsers that drop cookies on cross-site GET navigations.
+  // Verified on the callback by checking the signature with AUTH_SECRET.
+  const state = signOAuthState(session.officeId);
 
   const params = new URLSearchParams({
     client_id: clientId,
@@ -41,10 +35,51 @@ export async function getGmailAuthUrl(): Promise<{ url: string; state: string }>
     prompt: "consent",
     state,
   });
+  // Also drop a fallback cookie for older deployments still expecting one.
+  // Harmless if the callback ignores it.
+  try {
+    const c = await cookies();
+    c.set("gmail-oauth-nonce", state, {
+      path: "/",
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      maxAge: 600,
+    });
+  } catch { /* ignore */ }
   return {
     url: `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`,
     state,
   };
+}
+
+const STATE_TTL_MS = 15 * 60 * 1000; // 15 minutes — covers slow consent screens
+
+function getAuthSecret(): string {
+  const secret = process.env.AUTH_SECRET;
+  if (!secret) throw new Error("AUTH_SECRET is not set");
+  return secret;
+}
+
+export function signOAuthState(officeId: string): string {
+  const issuedAt = Date.now();
+  const payload = `${officeId}.${issuedAt}`;
+  const sig = crypto.createHmac("sha256", getAuthSecret()).update(payload).digest("hex").slice(0, 32);
+  return `${payload}.${sig}`;
+}
+
+export function verifyOAuthState(state: string, officeId: string): boolean {
+  const parts = state.split(".");
+  if (parts.length !== 3) return false;
+  const [stateOffice, issuedAtStr, sig] = parts;
+  if (stateOffice !== officeId) return false;
+  const issuedAt = parseInt(issuedAtStr, 10);
+  if (!Number.isFinite(issuedAt)) return false;
+  if (Date.now() - issuedAt > STATE_TTL_MS) return false;
+  const expected = crypto.createHmac("sha256", getAuthSecret()).update(`${stateOffice}.${issuedAtStr}`).digest("hex").slice(0, 32);
+  // Constant-time compare
+  if (sig.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
 }
 
 type TokenResponse = {

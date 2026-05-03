@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { prisma } from "@/lib/prisma";
 import { requireSession } from "@/lib/auth";
-import { exchangeCodeForTokens, getUserEmail } from "@/lib/gmail-oauth";
+import { exchangeCodeForTokens, getUserEmail, verifyOAuthState } from "@/lib/gmail-oauth";
 
 export async function GET(request: NextRequest) {
   const session = await requireSession();
@@ -22,15 +22,23 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(settingsUrl);
   }
 
-  // Verify state matches the nonce we set
-  const c = await cookies();
-  const nonce = c.get("gmail-oauth-nonce")?.value;
-  const [stateOffice, stateNonce] = state.split(".");
-  if (!nonce || stateNonce !== nonce || stateOffice !== session.officeId) {
-    settingsUrl.searchParams.set("oauth_error", "state_mismatch");
-    return NextResponse.redirect(settingsUrl);
+  // Verify state via HMAC signature — no cookie required. The state was
+  // signed with AUTH_SECRET on the start route and includes the officeId +
+  // issuedAt timestamp. Falls back to the legacy cookie nonce check for
+  // any in-flight OAuth flows started before this code shipped.
+  const stateValid = verifyOAuthState(state, session.officeId);
+  if (!stateValid) {
+    const c = await cookies();
+    const cookieNonce = c.get("gmail-oauth-nonce")?.value;
+    const [legacyOffice, legacyNonce] = state.split(".");
+    const legacyMatch = !!cookieNonce && cookieNonce === legacyNonce && legacyOffice === session.officeId;
+    if (!legacyMatch) {
+      settingsUrl.searchParams.set("oauth_error", "state_mismatch");
+      return NextResponse.redirect(settingsUrl);
+    }
   }
-  c.delete("gmail-oauth-nonce");
+  // Best-effort cleanup of any cookie left behind.
+  try { (await cookies()).delete("gmail-oauth-nonce"); } catch { /* ignore */ }
 
   try {
     const tokens = await exchangeCodeForTokens(code);
