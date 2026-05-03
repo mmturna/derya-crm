@@ -70,6 +70,8 @@ export default async function JobDetailPage({
       inquiry: { include: { carrierQuotes: { orderBy: { createdAt: "asc" } } } },
       documents: { orderBy: { createdAt: "asc" } },
       milestones: { orderBy: { createdAt: "asc" } },
+      parent:   { select: { id: true, reference: true, type: true } },
+      children: { select: { id: true, reference: true, type: true, status: true } },
       emailThreads: {
         include: { messages: { orderBy: { sentAt: "asc" } } },
       },
@@ -327,6 +329,25 @@ export default async function JobDetailPage({
 
         {/* ── RIGHT: Worktable ──────────────────────────────────────────── */}
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+
+          {/* Parent / child links */}
+          {(job.parent || job.children.length > 0) && (
+            <div className="card">
+              <div className="worktable-section-header">Linked jobs</div>
+              <div style={{ padding: "10px 18px", display: "flex", flexDirection: "column", gap: 6 }}>
+                {job.parent && (
+                  <a href={`/dashboard/jobs/${job.parent.id}`} style={{ fontSize: 12, color: "var(--brand)", textDecoration: "none" }}>
+                    ↑ Source: {job.parent.reference} <span style={{ fontSize: 10, color: "var(--text-3)" }}>{job.parent.type === "SOURCING" ? "Procurement" : "Forwarding"}</span>
+                  </a>
+                )}
+                {job.children.map((c) => (
+                  <a key={c.id} href={`/dashboard/jobs/${c.id}`} style={{ fontSize: 12, color: "var(--brand)", textDecoration: "none" }}>
+                    ↓ Spinoff: {c.reference} <span style={{ fontSize: 10, color: "var(--text-3)" }}>{c.type === "SOURCING" ? "Procurement" : "Forwarding"} · {c.status}</span>
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Customer */}
           <div className="card">

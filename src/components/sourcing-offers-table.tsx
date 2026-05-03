@@ -4,7 +4,7 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Icon } from "@/components/icon";
 import { extractSourcingOffersForInquiry } from "@/lib/sourcing-offers";
-import { awardSupplier, draftReplyToMessage } from "@/lib/sourcing-award";
+import { awardSupplier, draftReplyToMessage, draftCounterOffer } from "@/lib/sourcing-award";
 import { DraftModal } from "@/components/draft-modal";
 
 type Offer = {
@@ -37,6 +37,9 @@ export function SourcingOffersTable({ inquiryId, rows }: { inquiryId: string; ro
   const [busy, start] = useTransition();
   const [awardModal, setAwardModal] = useState<{ threadId: string; supplierName: string; draft: string; replyTo: string | null } | null>(null);
   const [replyModal, setReplyModal] = useState<{ threadId: string; supplierName: string; draft: string; replyTo: string | null } | null>(null);
+  const [counterModal, setCounterModal] = useState<{ threadId: string; supplierName: string; draft: string; replyTo: string | null } | null>(null);
+  const [counterPrompt, setCounterPrompt] = useState<{ threadId: string; supplierName: string } | null>(null);
+  const [counterTarget, setCounterTarget] = useState("");
 
   function refresh() {
     start(async () => {
@@ -56,6 +59,25 @@ export function SourcingOffersTable({ inquiryId, rows }: { inquiryId: string; ro
         replyTo: row.fromEmail,
       });
       router.refresh();
+    });
+  }
+  function counter(row: Row) {
+    setCounterPrompt({ threadId: row.threadId, supplierName: row.offer?.supplierName ?? row.fromEmail ?? "Supplier" });
+    setCounterTarget("");
+  }
+  function runCounter() {
+    if (!counterPrompt) return;
+    const target = counterTarget.trim() || "5% under their current price";
+    start(async () => {
+      const r = await draftCounterOffer({ threadId: counterPrompt.threadId, target });
+      if ("error" in r) { alert(r.error); return; }
+      setCounterModal({
+        threadId: counterPrompt.threadId,
+        supplierName: counterPrompt.supplierName,
+        draft: r.draft,
+        replyTo: r.replyTo,
+      });
+      setCounterPrompt(null);
     });
   }
   function draftReply(row: Row, intent?: string) {
@@ -198,6 +220,19 @@ export function SourcingOffersTable({ inquiryId, rows }: { inquiryId: string; ro
                             background: "transparent", color: "var(--brand)", border: "1px solid var(--brand-border)", cursor: "pointer",
                           }}
                         >AI reply</button>
+                        <button
+                          type="button"
+                          onClick={() => counter(r)}
+                          disabled={busy || !r.offer?.pricePerUnit}
+                          title={r.offer?.pricePerUnit ? "AI counter-offer at a target price" : "Need a parsed price first"}
+                          style={{
+                            fontSize: 10.5, padding: "2px 6px", borderRadius: 3,
+                            background: "transparent", color: "var(--text-2)",
+                            border: "1px solid var(--border)",
+                            cursor: r.offer?.pricePerUnit ? "pointer" : "not-allowed",
+                            opacity: r.offer?.pricePerUnit ? 1 : 0.5,
+                          }}
+                        >Counter</button>
                       </div>
                     </Td>
                   </tr>
@@ -227,6 +262,53 @@ export function SourcingOffersTable({ inquiryId, rows }: { inquiryId: string; ro
           replyTo={replyModal.replyTo}
           onClose={() => setReplyModal(null)}
         />
+      )}
+      {counterModal && (
+        <DraftModal
+          title={`Counter-offer — ${counterModal.supplierName}`}
+          subtitle={counterModal.replyTo ? `To: ${counterModal.replyTo}` : ""}
+          draft={counterModal.draft}
+          threadDbId={counterModal.threadId}
+          replyTo={counterModal.replyTo}
+          onClose={() => setCounterModal(null)}
+        />
+      )}
+      {counterPrompt && (
+        <div onClick={() => setCounterPrompt(null)} style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 100,
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            background: "var(--surface)", borderRadius: 8, width: "min(440px, 92vw)",
+            boxShadow: "0 12px 40px rgba(0,0,0,0.25)",
+          }}>
+            <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)" }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>Counter-offer to {counterPrompt.supplierName}</div>
+              <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 2 }}>What's your target?</div>
+            </div>
+            <div style={{ padding: 18 }}>
+              <input
+                type="text"
+                autoFocus
+                value={counterTarget}
+                onChange={(e) => setCounterTarget(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") runCounter(); if (e.key === "Escape") setCounterPrompt(null); }}
+                placeholder="$480/MT, 5% under best, match cheapest…"
+                style={{
+                  width: "100%", padding: "8px 12px",
+                  border: "1px solid var(--border-strong)", borderRadius: 4,
+                  fontSize: 13, outline: "none", background: "var(--surface)",
+                }}
+              />
+              <div style={{ marginTop: 14, display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                <button onClick={() => setCounterPrompt(null)} className="btn btn-secondary btn-sm" style={{ fontSize: 12 }}>Cancel</button>
+                <button onClick={runCounter} disabled={busy} className="btn btn-sm" style={{ fontSize: 12 }}>
+                  {busy ? "Drafting…" : "Draft counter-offer"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

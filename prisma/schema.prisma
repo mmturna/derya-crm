@@ -510,12 +510,15 @@ model Job {
   portalToken      String?   @unique  // public magic-link token for /portal/[token]
   notifyCustomer   Boolean   @default(true)  // auto-email customer on status/milestone changes
   customerEmail    String?   // override for status-update emails; defaults to inquiry.fromEmail
+  parentJobId      String?   // when a SOURCING award spins up a child FORWARDING job
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
   office       Office        @relation(fields: [officeId], references: [id], onDelete: Cascade)
   company      Company?      @relation(fields: [companyId], references: [id], onDelete: SetNull)
   inquiry      Inquiry?      @relation(fields: [inquiryId], references: [id])
+  parent       Job?          @relation("JobParent", fields: [parentJobId], references: [id], onDelete: SetNull)
+  children     Job[]         @relation("JobParent")
   documents    JobDocument[]
   milestones   JobMilestone[]
   emailThreads EmailThread[]
