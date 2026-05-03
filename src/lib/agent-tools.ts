@@ -321,16 +321,15 @@ export const TOOLS = [
   },
   {
     name: "link_threads_to_job",
-    description: "Find email threads matching a query (commodity / sender / subject) and link them all to the focused job's inquiry. Use this when the operator says 'the emails about X belong to this job' or asks why supplier offers aren't showing up — search and link in one step.",
+    description: "Find email threads matching a query and link them all to the focused job's inquiry. If `q` is omitted, the tool derives search terms automatically from the job itself (commodity name, origin/destination, customer name, customer email domain). Use this when the operator says 'attach related emails', 'why aren't offers showing up', 'find related threads', or 'pull in the supplier emails for this load'.",
     input_schema: {
       type: "object",
       properties: {
-        q: { type: "string", description: "Search query — commodity name, sender domain, supplier name, etc." },
+        q: { type: "string", description: "Optional override search query. Leave empty to auto-derive from the job's commodity/route/customer." },
         job_id: { type: "string", description: "Defaults to focused job" },
-        only_unlinked: { type: "boolean", description: "Default true — skip threads already linked to a different deal" },
+        only_unlinked: { type: "boolean", description: "Default true — skip threads already linked elsewhere" },
         limit: { type: "number", description: "Max threads to link, default 50" },
       },
-      required: ["q"],
     },
   },
   {
@@ -760,36 +759,78 @@ export async function dispatchTool(
         if (!jobId) return { ok: false, error: "No job in scope" };
         const job = await prisma.job.findFirst({
           where: { id: jobId, officeId: ctx.officeId },
-          select: { id: true, type: true, inquiryId: true, reference: true, commodity: true },
+          select: {
+            id: true, type: true, inquiryId: true, reference: true,
+            commodity: true, origin: true, destination: true,
+            company: { select: { name: true } },
+            inquiry: { select: { fromEmail: true, fromCompany: true } },
+          },
         });
         if (!job?.inquiryId) return { ok: false, error: "Focused job has no linked inquiry" };
-        const q = String(input.q ?? "");
+
+        // Build search terms. Operator override beats auto-derivation.
+        const explicitQ = (input.q as string | undefined)?.trim();
+        const terms: string[] = [];
+        if (explicitQ) {
+          terms.push(explicitQ);
+        } else {
+          // Derive from job context: commodity (split into per-word too), route, customer.
+          if (job.commodity) {
+            terms.push(job.commodity);
+            // Also search per significant word so "soybean meal" matches "soybean", "SBM", etc.
+            for (const w of job.commodity.split(/\s+/)) {
+              if (w.length >= 4 && !terms.includes(w)) terms.push(w);
+            }
+          }
+          if (job.destination) terms.push(job.destination);
+          if (job.origin) terms.push(job.origin);
+          if (job.company?.name) terms.push(job.company.name);
+          if (job.inquiry?.fromEmail) {
+            const domain = job.inquiry.fromEmail.split("@")[1];
+            if (domain) terms.push(domain);
+          }
+          if (job.inquiry?.fromCompany) terms.push(job.inquiry.fromCompany);
+        }
+        if (terms.length === 0) return { ok: false, error: "No commodity/route/customer set on this job — pass q explicitly or run populate_job_from_emails first." };
+
         const onlyUnlinked = input.only_unlinked !== false;
         const limit = Math.min(100, Number(input.limit ?? 50));
-        const where: any = {
-          officeId: ctx.officeId,
-          OR: [
-            { subject: { contains: q, mode: "insensitive" } },
-            { messages: { some: { OR: [
-              { bodyText: { contains: q, mode: "insensitive" } },
-              { fromEmail: { contains: q, mode: "insensitive" } },
-              { fromName: { contains: q, mode: "insensitive" } },
-            ] } } },
-          ],
-        };
-        if (onlyUnlinked) {
-          where.jobId = null;
-          where.OR = [
-            ...where.OR.map((cond: any) => ({ ...cond, inquiryId: null })),
-          ];
+
+        // Build a big OR query across all terms × all fields.
+        const orClauses: any[] = [];
+        for (const term of terms) {
+          orClauses.push({ subject: { contains: term, mode: "insensitive" } });
+          orClauses.push({ messages: { some: { OR: [
+            { bodyText: { contains: term, mode: "insensitive" } },
+            { fromEmail: { contains: term, mode: "insensitive" } },
+            { fromName: { contains: term, mode: "insensitive" } },
+          ] } } });
         }
-        const threads = await prisma.emailThread.findMany({ where, take: limit, select: { id: true, subject: true } });
-        if (threads.length === 0) return { ok: true, result: { linked: 0, message: `No matching threads found for "${q}"` } };
+        const where: any = { officeId: ctx.officeId, OR: orClauses };
+        if (onlyUnlinked) {
+          // Only consider threads not already on a different inquiry/job.
+          where.jobId = null;
+          where.AND = [{ OR: [{ inquiryId: null }, { inquiryId: job.inquiryId }] }];
+        }
+
+        const threads = await prisma.emailThread.findMany({
+          where, take: limit, select: { id: true, subject: true, inquiryId: true },
+        });
+        const toLink = threads.filter((t) => t.inquiryId !== job.inquiryId);
+        if (toLink.length === 0) {
+          return { ok: true, result: {
+            linked: 0,
+            already_linked: threads.length,
+            search_terms: terms,
+            message: threads.length > 0
+              ? `Already linked ${threads.length} matching thread(s) to this job. Nothing new to attach.`
+              : `No matching threads found across [${terms.join(", ")}]`,
+          } };
+        }
         await prisma.emailThread.updateMany({
-          where: { id: { in: threads.map((t) => t.id) } },
+          where: { id: { in: toLink.map((t) => t.id) } },
           data: { inquiryId: job.inquiryId, autoLinkedAt: new Date() },
         });
-        // Auto-extract supplier offers if SOURCING.
         if (job.type === "SOURCING") {
           try { await extractSourcingOffersForInquiry(job.inquiryId); } catch {}
         }
@@ -799,9 +840,10 @@ export async function dispatchTool(
         return {
           ok: true,
           result: {
-            linked: threads.length,
+            linked: toLink.length,
             job_reference: job.reference,
-            sample_subjects: threads.slice(0, 5).map((t) => t.subject),
+            search_terms: terms,
+            sample_subjects: toLink.slice(0, 5).map((t) => t.subject),
             note: job.type === "SOURCING" ? "Supplier offers re-extracted." : undefined,
           },
         };
