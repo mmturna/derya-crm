@@ -404,6 +404,51 @@ export async function snoozeThread(threadId: string, until: "4h" | "tomorrow" | 
   revalidatePath("/dashboard/inbox");
 }
 
+export async function bulkHideThreads(threadIds: string[]): Promise<{ hidden: number }> {
+  const session = await requireSession();
+  if (threadIds.length === 0) return { hidden: 0 };
+  const r = await prisma.emailThread.updateMany({
+    where: { id: { in: threadIds }, officeId: session.officeId },
+    data: { hiddenAt: new Date() },
+  });
+  revalidatePath("/dashboard/inbox");
+  return { hidden: r.count };
+}
+
+export async function bulkSnoozeThreads(threadIds: string[], until: "4h" | "tomorrow" | "monday"): Promise<{ snoozed: number }> {
+  const session = await requireSession();
+  if (threadIds.length === 0) return { snoozed: 0 };
+  const now = new Date();
+  let dt = new Date(now);
+  if (until === "4h") dt = new Date(now.getTime() + 4 * 3600 * 1000);
+  else if (until === "tomorrow") { dt.setDate(dt.getDate() + 1); dt.setHours(9, 0, 0, 0); }
+  else if (until === "monday") {
+    const daysToMon = (1 - dt.getDay() + 7) % 7 || 7;
+    dt.setDate(dt.getDate() + daysToMon); dt.setHours(9, 0, 0, 0);
+  }
+  const r = await prisma.emailThread.updateMany({
+    where: { id: { in: threadIds }, officeId: session.officeId },
+    data: { snoozedUntil: dt },
+  });
+  revalidatePath("/dashboard/inbox");
+  return { snoozed: r.count };
+}
+
+export async function bulkLinkThreadsToInquiry(threadIds: string[], inquiryId: string): Promise<{ linked: number }> {
+  const session = await requireSession();
+  if (threadIds.length === 0) return { linked: 0 };
+  const inq = await prisma.inquiry.findFirst({ where: { id: inquiryId, officeId: session.officeId }, select: { id: true } });
+  if (!inq) return { linked: 0 };
+  const r = await prisma.emailThread.updateMany({
+    where: { id: { in: threadIds }, officeId: session.officeId },
+    data: { inquiryId: inq.id, autoLinkedAt: new Date() },
+  });
+  revalidatePath("/dashboard/inbox");
+  revalidatePath("/dashboard/rfq");
+  revalidatePath("/dashboard/jobs");
+  return { linked: r.count };
+}
+
 export async function unsnoozeThread(threadId: string): Promise<void> {
   const session = await requireSession();
   const found = await prisma.emailThread.findFirst({ where: { id: threadId, officeId: session.officeId } });

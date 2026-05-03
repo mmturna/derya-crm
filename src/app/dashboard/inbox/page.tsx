@@ -7,6 +7,8 @@ import { MergeDuplicatesButton } from "@/components/merge-duplicates-button";
 import { InboxQuickReply } from "@/components/inbox-quick-reply";
 import { HideThreadButton } from "@/components/hide-thread-button";
 import { SnoozeThreadButton } from "@/components/snooze-thread-button";
+import { BulkCheckbox } from "@/components/bulk-checkbox";
+import { BulkActionBar } from "@/components/bulk-action-bar";
 
 const FILTERS = [
   { key: "",                  label: "Active"          },  // default — excludes hidden + snoozed
@@ -158,6 +160,14 @@ export default async function InboxPage({
     if (key === "_ALL") return totalAll;
     return 0;
   }
+
+  // Open inquiries shown in the bulk-action "Link to load" picker.
+  const openInquiriesForBulk = (await prisma.inquiry.findMany({
+    where: { officeId: session.officeId, status: { in: ["INGESTED", "PARSED", "PRICED", "QUOTED"] } },
+    select: { id: true, subject: true, type: true },
+    orderBy: { receivedAt: "desc" },
+    take: 50,
+  })).map((i) => ({ id: i.id, subject: i.subject, type: i.type }));
 
   // For the "loads" view, group threads under their linked job/inquiry.
   type LoadGroup = {
@@ -318,6 +328,8 @@ export default async function InboxPage({
         </div>
       </div>
 
+      <BulkActionBar inquiries={openInquiriesForBulk} />
+
       {threads.length === 0 ? (
         <div className="card" style={{ padding: "40px 24px", textAlign: "center" }}>
           {accounts.length === 0 ? (
@@ -357,6 +369,7 @@ export default async function InboxPage({
                   const last = t.messages[t.messages.length - 1];
                   return (
                     <div key={t.id} style={{ padding: "10px 16px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "flex-start", gap: 10 }}>
+                      <BulkCheckbox threadId={t.id} />
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {t.subject}
@@ -392,6 +405,7 @@ export default async function InboxPage({
               <div key={t.id} className="card" style={{ overflow: "hidden", borderLeft: linked ? "3px solid var(--brand)" : "3px solid transparent" }}>
                 <div style={{ padding: "12px 16px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
+                    <BulkCheckbox threadId={t.id} />
                     <span style={{
                       display: "inline-flex", fontSize: 9.5, fontWeight: 700, padding: "2px 6px", borderRadius: 3,
                       background: meta.bg, color: meta.fg, border: `1px solid ${meta.bd}`,
