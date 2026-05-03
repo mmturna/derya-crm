@@ -108,8 +108,24 @@ export async function syncEmailAccount(accountId: string): Promise<
   | { error: string }
 > {
   const session = await requireSession();
+  return _syncEmailAccountInternal({ accountId, officeId: session.officeId });
+}
+
+// Cron-callable version that skips the session check. Caller must already
+// have authorized via the cron secret.
+export async function syncEmailAccountInternal(accountId: string, officeId: string): Promise<
+  | { ok: true; processed: number; created: number; threadsTouched: number; autoInquiries: number; autoLinked: number }
+  | { error: string }
+> {
+  return _syncEmailAccountInternal({ accountId, officeId });
+}
+
+async function _syncEmailAccountInternal({ accountId, officeId }: { accountId: string; officeId: string }): Promise<
+  | { ok: true; processed: number; created: number; threadsTouched: number; autoInquiries: number; autoLinked: number }
+  | { error: string }
+> {
   const account = await prisma.emailAccount.findFirst({
-    where: { id: accountId, officeId: session.officeId },
+    where: { id: accountId, officeId },
   });
   if (!account) return { error: "Account not found" };
   if (account.provider !== "GMAIL") return { error: "Only Gmail sync is implemented" };
