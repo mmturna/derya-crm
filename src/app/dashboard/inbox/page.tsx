@@ -10,6 +10,7 @@ import { SnoozeThreadButton } from "@/components/snooze-thread-button";
 import { BulkCheckbox } from "@/components/bulk-checkbox";
 import { BulkActionBar } from "@/components/bulk-action-bar";
 import { LoadFilterPicker } from "@/components/load-filter-picker";
+import { RfqRowActions } from "@/components/rfq-row-actions";
 
 const FILTERS = [
   { key: "",                  label: "Active"          },  // default — excludes hidden + snoozed
@@ -228,6 +229,15 @@ export default async function InboxPage({
     orderBy: { receivedAt: "desc" },
     take: 100,
   }) : [];
+
+  // Active jobs available as merge targets (excluding PROPOSED — those are
+  // RFQs themselves, not active loads).
+  const activeJobsForMerge = view === "rfqs" ? (await prisma.job.findMany({
+    where: { officeId: session.officeId, status: { notIn: ["PROPOSED", "DELIVERED", "CANCELLED"] } },
+    select: { id: true, reference: true, type: true, company: { select: { name: true } } },
+    orderBy: { updatedAt: "desc" },
+    take: 80,
+  })).map((j) => ({ id: j.id, reference: j.reference, type: j.type, customer: j.company?.name ?? null })) : [];
 
   // Open inquiries shown in the bulk-action "Link to load" picker.
   const openInquiriesForBulk = (await prisma.inquiry.findMany({
@@ -448,7 +458,7 @@ export default async function InboxPage({
       <BulkActionBar inquiries={openInquiriesForBulk} />
 
       {view === "rfqs" ? (
-        <RfqListView rfqs={rfqs} />
+        <RfqListView rfqs={rfqs} activeJobs={activeJobsForMerge} />
       ) : threads.length === 0 ? (
         <div className="card" style={{ padding: "40px 24px", textAlign: "center" }}>
           {accounts.length === 0 ? (
@@ -708,7 +718,7 @@ const RFQ_STATUS_META: Record<string, { label: string; cls: string }> = {
   LOST:     { label: "Lost",   cls: "badge-danger" },
 };
 
-function RfqListView({ rfqs }: { rfqs: RfqRow[] }) {
+function RfqListView({ rfqs, activeJobs }: { rfqs: RfqRow[]; activeJobs: { id: string; reference: string; type: string; customer: string | null }[] }) {
   if (rfqs.length === 0) {
     return (
       <div className="card" style={{ padding: "40px 24px", textAlign: "center" }}>
@@ -732,6 +742,7 @@ function RfqListView({ rfqs }: { rfqs: RfqRow[] }) {
             <th style={thStyle}>Job</th>
             <th style={thStyle}>Threads</th>
             <th style={thStyle}>Received</th>
+            <th style={thStyle}>Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -772,6 +783,19 @@ function RfqListView({ rfqs }: { rfqs: RfqRow[] }) {
                 </td>
                 <td style={{ ...tdStyle, fontSize: 11.5, color: "var(--text-3)" }}>
                   {new Date(r.receivedAt).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}
+                </td>
+                <td style={tdStyle}>
+                  {r.job && r.job.status !== "PROPOSED" ? (
+                    <span style={{ fontSize: 10.5, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                      Already a job
+                    </span>
+                  ) : (
+                    <RfqRowActions
+                      inquiryId={r.id}
+                      jobLinked={!!r.job && r.job.status !== "PROPOSED"}
+                      activeJobs={activeJobs}
+                    />
+                  )}
                 </td>
               </tr>
             );

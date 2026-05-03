@@ -4,6 +4,7 @@ import { requireSession } from "@/lib/auth";
 import { getFocusedJobId } from "@/lib/job-focus";
 import { Icon } from "@/components/icon";
 import { JobConfirmActions } from "@/components/job-confirm-button";
+import { SeedDemoButton } from "@/components/seed-demo-button";
 
 const STATUSES = [
   { key: "PROPOSED",   label: "Proposed"   },
@@ -87,7 +88,8 @@ export default async function JobsPage({
               Operations
             </Link>
           </div>
-          <Link href="/dashboard/rfq" className="btn btn-secondary" style={{ fontSize: 13, textDecoration: "none" }}>
+          <SeedDemoButton />
+          <Link href="/dashboard/inbox?view=rfqs" className="btn btn-secondary" style={{ fontSize: 13, textDecoration: "none" }}>
             From RFQ
           </Link>
           <a href="/dashboard/jobs/new" className="btn" style={{ fontSize: 13, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 6 }}>
