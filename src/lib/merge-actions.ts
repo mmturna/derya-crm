@@ -32,7 +32,7 @@ export async function consolidateDuplicateInquiries(): Promise<
     },
     select: {
       id: true, subject: true, type: true, fromEmail: true, fromCompany: true,
-      commodity: true, origin: true, destination: true, mode: true,
+      commodity: true, origin: true, destination: true, mode: true, notes: true,
       receivedAt: true, createdAt: true,
       job: { select: { id: true, status: true } },
     },
@@ -42,9 +42,10 @@ export async function consolidateDuplicateInquiries(): Promise<
   if (inquiries.length < 2) return { ok: true, clusters: 0, merged: 0 };
 
   // Build candidate list for the AI.
-  const lines = inquiries.map((i, idx) =>
-    `[${idx}] id=${i.id} | ${i.type} | "${i.subject}" | from=${i.fromEmail ?? i.fromCompany ?? "?"} | commodity=${i.commodity ?? "—"} | route=${i.origin ?? "?"}→${i.destination ?? "?"} | mode=${i.mode ?? "—"} | created=${i.createdAt.toISOString().split("T")[0]}`
-  ).join("\n");
+  const lines = inquiries.map((i, idx) => {
+    const summary = i.notes ? ` | summary=${i.notes.replace(/\s+/g, " ").trim().slice(0, 240)}` : "";
+    return `[${idx}] id=${i.id} | ${i.type} | "${i.subject}" | from=${i.fromEmail ?? i.fromCompany ?? "?"} | commodity=${i.commodity ?? "—"} | route=${i.origin ?? "?"}→${i.destination ?? "?"} | mode=${i.mode ?? "—"} | created=${i.createdAt.toISOString().split("T")[0]}${summary}`;
+  }).join("\n");
 
   const client = new Anthropic({ apiKey });
   const result = await client.messages.create({
@@ -60,7 +61,7 @@ Output ONLY this JSON (no markdown):
 ] }
 
 Rules:
-- Cluster TOGETHER inquiries that represent the SAME underlying deal. Strong signals: same commodity (loose match — "soybean" / "soybean meal" / "SBM" all match), same buyer/customer, overlapping origin or destination, similar subjects (Re:/Fwd: chains, common stem like "Animal Feed Grade Soybean Meal").
+- Cluster TOGETHER inquiries that represent the SAME underlying deal. Strong signals: same commodity (loose match — "soybean" / "soybean meal" / "SBM" all match), same buyer/customer, overlapping origin or destination, similar subjects (Re:/Fwd: chains, common stem like "Animal Feed Grade Soybean Meal"), or a "summary" field that mentions the other inquiry's commodity/route/buyer (umbrella deals like "multi-destination procurement" whose summary names specific countries should absorb single-country threads).
 - Use the type as a tiebreaker: SOURCING duplicates are very common; FORWARDING duplicates are rarer.
 - Only include clusters of size >= 2. Singletons go nowhere.
 - Be aggressive about merging — duplicates are a bigger pain than over-merging. The operator can split later.

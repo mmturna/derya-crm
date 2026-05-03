@@ -148,23 +148,26 @@ export async function autoCreateInquiryFromThread(threadId: string): Promise<
   const [openInquiries, activeJobs] = await Promise.all([
     prisma.inquiry.findMany({
       where: { officeId: thread.officeId, status: { in: ["INGESTED", "PARSED", "PRICED", "QUOTED"] } },
-      select: { id: true, subject: true, type: true, fromEmail: true, fromCompany: true, commodity: true, origin: true, destination: true, mode: true, company: { select: { name: true } } },
+      select: { id: true, subject: true, type: true, fromEmail: true, fromCompany: true, commodity: true, origin: true, destination: true, mode: true, notes: true, company: { select: { name: true } } },
       orderBy: { receivedAt: "desc" },
       take: 80,
     }),
     prisma.job.findMany({
       where: { officeId: thread.officeId, status: { notIn: ["DELIVERED", "CANCELLED"] } },
-      select: { id: true, reference: true, type: true, origin: true, destination: true, mode: true, company: { select: { name: true } }, inquiry: { select: { fromEmail: true, commodity: true } } },
+      select: { id: true, reference: true, type: true, origin: true, destination: true, mode: true, company: { select: { name: true } }, inquiry: { select: { fromEmail: true, commodity: true, notes: true } } },
       orderBy: { updatedAt: "desc" },
       take: 40,
     }),
   ]);
 
+  const summarize = (s: string | null | undefined) =>
+    s ? ` | summary: ${s.replace(/\s+/g, " ").trim().slice(0, 240)}` : "";
+
   const inquiryHints = openInquiries.map((i) =>
-    `${i.id} | ${i.type} | "${i.subject}" | ${i.fromEmail ?? i.fromCompany ?? "?"} | ${i.company?.name ?? "—"} | commodity: ${i.commodity ?? "—"} | ${i.origin ?? "?"} → ${i.destination ?? "?"} | ${i.mode ?? "—"}`
+    `${i.id} | ${i.type} | "${i.subject}" | ${i.fromEmail ?? i.fromCompany ?? "?"} | ${i.company?.name ?? "—"} | commodity: ${i.commodity ?? "—"} | ${i.origin ?? "?"} → ${i.destination ?? "?"} | ${i.mode ?? "—"}${summarize(i.notes)}`
   ).join("\n");
   const jobHints = activeJobs.map((j) =>
-    `${j.id} | ${j.reference} | ${j.type} | ${j.company?.name ?? "—"} | ${j.inquiry?.fromEmail ?? "—"} | commodity: ${j.inquiry?.commodity ?? "—"} | ${j.origin ?? "?"} → ${j.destination ?? "?"} | ${j.mode ?? "—"}`
+    `${j.id} | ${j.reference} | ${j.type} | ${j.company?.name ?? "—"} | ${j.inquiry?.fromEmail ?? "—"} | commodity: ${j.inquiry?.commodity ?? "—"} | ${j.origin ?? "?"} → ${j.destination ?? "?"} | ${j.mode ?? "—"}${summarize(j.inquiry?.notes)}`
   ).join("\n");
 
   const transcript = thread.messages.map((m) => {
@@ -200,6 +203,7 @@ Strong LINK signals (ANY one is enough — be aggressive):
 - Same origin or destination country combined with same commodity family.
 - Reply chains, Re:/Fwd: subject lines whose stem matches an existing subject.
 - Shared booking/BL/container reference number.
+- The candidate's "summary" field mentions the thread's commodity, origin, destination, or buyer — even if the top-level fields don't (e.g. a "multi-destination" inquiry whose summary lists Portugal will match a new Portugal-bound thread).
 
 When in doubt between LINK and CREATE: choose LINK. Duplicate inquiries are worse than over-linking — the operator can split later.
 
