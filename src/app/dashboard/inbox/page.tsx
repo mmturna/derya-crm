@@ -55,13 +55,14 @@ function dominantKind(messages: { direction: string; classification: string | nu
 export default async function InboxPage({
   searchParams,
 }: {
-  searchParams: Promise<{ filter?: string; account?: string; view?: string }>;
+  searchParams: Promise<{ filter?: string; account?: string; view?: string; q?: string }>;
 }) {
   const session = await requireSession();
   const sp = await searchParams;
   const filter = sp.filter ?? "";
   const accountFilter = sp.account ?? "";
   const view = sp.view === "loads" ? "loads" : "threads";
+  const searchQuery = (sp.q ?? "").trim();
 
   const accounts = await prisma.emailAccount.findMany({
     where: { officeId: session.officeId, isActive: true },
@@ -88,6 +89,21 @@ export default async function InboxPage({
   }
   if (accountFilter) {
     where.messages = { some: { accountId: accountFilter } };
+  }
+  if (searchQuery) {
+    // Search across thread subject + any message body / sender / subject.
+    where.OR = [
+      ...(where.OR ?? []),
+      { subject: { contains: searchQuery, mode: "insensitive" } },
+      { messages: { some: {
+        OR: [
+          { bodyText: { contains: searchQuery, mode: "insensitive" } },
+          { subject:  { contains: searchQuery, mode: "insensitive" } },
+          { fromEmail:{ contains: searchQuery, mode: "insensitive" } },
+          { fromName: { contains: searchQuery, mode: "insensitive" } },
+        ],
+      } } },
+    ];
   }
 
   let threads = await prisma.emailThread.findMany({
@@ -216,6 +232,37 @@ export default async function InboxPage({
           {accounts.map((a) => (
             <a key={a.id} href={`/dashboard/inbox?account=${a.id}${filter ? `&filter=${filter}` : ""}`} style={chipStyle(accountFilter === a.id)}>{a.email}</a>
           ))}
+        </div>
+      )}
+
+      <form method="get" action="/dashboard/inbox" style={{ display: "flex", gap: 6, marginBottom: 10, alignItems: "center" }}>
+        {filter && <input type="hidden" name="filter" value={filter} />}
+        {accountFilter && <input type="hidden" name="account" value={accountFilter} />}
+        {view === "loads" && <input type="hidden" name="view" value="loads" />}
+        <div style={{ position: "relative", flex: 1, maxWidth: 480 }}>
+          <input
+            type="search"
+            name="q"
+            defaultValue={searchQuery}
+            placeholder="Search subjects, bodies, senders…"
+            style={{
+              width: "100%", padding: "8px 12px 8px 32px",
+              border: "1px solid var(--border)", borderRadius: 4,
+              fontSize: 13, background: "var(--surface)",
+              outline: "none",
+            }}
+          />
+          <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--text-3)" }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          </span>
+        </div>
+        {searchQuery && (
+          <a href={`/dashboard/inbox${filter ? `?filter=${filter}` : ""}`} style={{ fontSize: 12, color: "var(--text-3)", textDecoration: "none" }}>Clear</a>
+        )}
+      </form>
+      {searchQuery && (
+        <div style={{ fontSize: 12, color: "var(--text-3)", marginBottom: 10 }}>
+          Searching for <strong style={{ color: "var(--text)" }}>{searchQuery}</strong> · {threads.length} match{threads.length === 1 ? "" : "es"}
         </div>
       )}
 

@@ -7,6 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { populateJobFromEmails } from "@/lib/job-populate";
 import { mergeAllOpenInquiriesIntoOne, consolidateDuplicateInquiries } from "@/lib/merge-actions";
 import { awardSupplier, draftReplyToMessage } from "@/lib/sourcing-award";
+import { extractActionFromMessage, applyEditJob, applyMoveStage, applyAddMilestone } from "@/lib/agent-actions";
 
 export type ChatMsg = { role: "user" | "assistant"; content: string };
 
@@ -34,6 +35,9 @@ Your job:
     5. Draft a reply to the latest inbound message on a job: "draft a reply", "write a response", "compose an email back to them". Optionally pass intent like "counter at $480/MT" or "ask for sample".
     6. List threads awaiting a reply: "what needs reply", "what's pending", "who's waiting on me".
     7. Hide unrelated threads in bulk: "hide unrelated", "mark spam as unrelated", "dismiss the noise".
+    8. Edit a job's fields directly (when scoped to a job): "set ETD to May 20", "weight is 18 tons", "incoterms CIF", "the supplier is HONEY OTOMOTIV". Multi-field updates work in one message.
+    9. Move a job to a new stage: "mark this booked", "this is in transit now", "move to customs", "we received it".
+    10. Log a milestone: "log that BL was issued today", "ETA confirmed for May 22", "cargo ready next Tuesday". Type and date are extracted from the message.
   Never tell the user you "can't create / can't merge / it's a workflow they need to do manually" — these actions exist. If the request is ambiguous, run the action you think is closest and report what changed.`;
 
 const RFQ_KEYWORDS = /\b(FCL|LCL|RFQ|quote|shipment|container|ETD|ETA|freight|cargo|BL|TEU|shipping|Incoterms|EXW|FOB|DAP|DDP|forwarder|carrier|ocean|airfreight|trucking)\b/i;
@@ -319,6 +323,45 @@ export async function chatWithAgent(history: ChatMsg[], userMessage: string, sco
     if ("error" in r) return { reply: `Couldn't dedupe: ${r.error}` };
     if (r.merged === 0) return { reply: `No duplicates found across your open inquiries.` };
     return { reply: `Merged ${r.merged} duplicate inquiries into ${r.clusters} cleaned-up deal${r.clusters === 1 ? "" : "s"}.` };
+  }
+
+  // Branch 1.42: Structured-action extraction — only when focused on a job.
+  // Catches "set ETD May 20", "mark this booked", "log BL issued today", etc.
+  if (scopeJobId) {
+    const job = await prisma.job.findFirst({
+      where: { id: scopeJobId, officeId: session.officeId },
+      select: { id: true, type: true, status: true, reference: true },
+    });
+    if (job) {
+      const extracted = await extractActionFromMessage({
+        userMessage,
+        scopeJobId,
+        scopeType: (job.type === "SOURCING" ? "SOURCING" : "FORWARDING"),
+        scopeStatus: job.status,
+      });
+      if (extracted.action === "edit-job") {
+        const r = await applyEditJob(scopeJobId, session.officeId, extracted.fields);
+        if (r.applied.length === 0) {
+          return { reply: `Couldn't apply any field updates from that — try being explicit, e.g. "set ETD to May 20" or "weight is 18 tons".` };
+        }
+        return { reply: `Updated ${job.reference}: ${r.applied.join(", ")}.` };
+      }
+      if (extracted.action === "move-stage") {
+        const r = await applyMoveStage(scopeJobId, session.officeId, extracted.status);
+        if ("error" in r) return { reply: `Couldn't change status: ${r.error}` };
+        const procurement = job.type === "SOURCING";
+        const labelMap: Record<string, string> = procurement
+          ? { PROPOSED: "Proposed", INQUIRY: "Negotiating", QUOTED: "Award pending", BOOKED: "Awarded", IN_TRANSIT: "Shipping", CUSTOMS: "In transit", DELIVERED: "Received", CANCELLED: "Cancelled" }
+          : { PROPOSED: "Proposed", INQUIRY: "Inquiry", QUOTED: "Quoted", BOOKED: "Booked", IN_TRANSIT: "In Transit", CUSTOMS: "Customs", DELIVERED: "Delivered", CANCELLED: "Cancelled" };
+        return { reply: `Moved ${job.reference} from ${labelMap[r.from] ?? r.from} to ${labelMap[r.to] ?? r.to}.` };
+      }
+      if (extracted.action === "add-milestone") {
+        const r = await applyAddMilestone(scopeJobId, session.officeId, extracted);
+        if ("error" in r) return { reply: `Couldn't log milestone: ${r.error}` };
+        const when = extracted.actualAt ? `confirmed ${extracted.actualAt}` : extracted.plannedAt ? `planned ${extracted.plannedAt}` : "logged";
+        return { reply: `Logged ${extracted.type.replace(/_/g, " ").toLowerCase()} milestone — ${when}.` };
+      }
+    }
   }
 
   // Branch 1.45: Award/draft-reply intents — only meaningful when focused on a job.
