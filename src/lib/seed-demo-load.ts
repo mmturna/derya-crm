@@ -64,12 +64,25 @@ function makeDemoPdfDataUrl(title: string, lines: string[]): string {
 //
 // Idempotent — returns the existing demo job if one already exists.
 export async function seedDemoLoad(args: { officeId: string }): Promise<{ ok: true; jobId: string; reference: string; created: boolean } | { error: string }> {
-  // Check if a previous seed exists.
+  // Check if a previous seed exists by looking for the marker in notes.
   const existing = await prisma.job.findFirst({
     where: { officeId: args.officeId, notes: { contains: "[DEMO_LOAD_SEED]" } },
     select: { id: true, reference: true },
   });
   if (existing) return { ok: true, jobId: existing.id, reference: existing.reference, created: false };
+
+  // Look for orphaned demo state from a previous half-completed run:
+  // an inquiry whose subject starts with "DEMO ·" but has no Job linked.
+  // If we find one, finish the job creation against THAT inquiry instead of
+  // creating duplicates.
+  const orphanInquiry = await prisma.inquiry.findFirst({
+    where: {
+      officeId: args.officeId,
+      subject: { startsWith: "DEMO ·" },
+      job: null,
+    },
+    select: { id: true, companyId: true, mode: true, origin: true, destination: true, commodity: true, incoterms: true, weight: true, volume: true },
+  });
 
   // Customer — name starts with "DEMO" so it's visually obvious this is a
   // staged record vs the operator's real customers.
@@ -94,30 +107,35 @@ export async function seedDemoLoad(args: { officeId: string }): Promise<{ ok: tr
     });
   }
 
-  // Inquiry (the source RFQ)
-  const inquiry = await prisma.inquiry.create({
-    data: {
-      officeId: args.officeId,
-      companyId: company.id,
-      subject: "DEMO · Steel coils — Constanta to Hamburg, 1x40HC",
-      fromEmail: "ops@blackseatrading.example",
-      fromCompany: "Black Sea Trading Co",
-      type: "FORWARDING",
-      status: "QUOTED",
-      origin: "Constanta, RO",
-      destination: "Hamburg, DE",
-      mode: "SEA-FCL",
-      containerType: "40HC",
-      incoterms: "FOB",
-      commodity: "Cold-rolled steel coils, 18 MT",
-      weight: 18000,
-      volume: 28,
-      cargoReadyDate: new Date(Date.now() + 4 * 86400000),
-      receivedAt: new Date(Date.now() - 6 * 86400000),
-      notes: "Customer is repeat shipper — 4 prior loads on this lane.",
-      rawEmailBody: "[Demo seed] Original RFQ from Black Sea Trading Co requesting rate Constanta → Hamburg, 1x40HC steel coils.",
-    },
-  });
+  // Inquiry (the source RFQ) — reuse orphan from previous failed run if found
+  const inquiry = orphanInquiry
+    ? await prisma.inquiry.update({
+        where: { id: orphanInquiry.id },
+        data: { companyId: company.id },
+      })
+    : await prisma.inquiry.create({
+        data: {
+          officeId: args.officeId,
+          companyId: company.id,
+          subject: "DEMO · Steel coils — Constanta to Hamburg, 1x40HC",
+          fromEmail: "ops@blackseatrading.example",
+          fromCompany: "Black Sea Trading Co",
+          type: "FORWARDING",
+          status: "QUOTED",
+          origin: "Constanta, RO",
+          destination: "Hamburg, DE",
+          mode: "SEA-FCL",
+          containerType: "40HC",
+          incoterms: "FOB",
+          commodity: "Cold-rolled steel coils, 18 MT",
+          weight: 18000,
+          volume: 28,
+          cargoReadyDate: new Date(Date.now() + 4 * 86400000),
+          receivedAt: new Date(Date.now() - 6 * 86400000),
+          notes: "Customer is repeat shipper — 4 prior loads on this lane.",
+          rawEmailBody: "[Demo seed] Original RFQ from Black Sea Trading Co requesting rate Constanta → Hamburg, 1x40HC steel coils.",
+        },
+      });
 
   // Job — set up like a mid-pipeline shipment.
   // Reference must be next-available (not count+1) — see nextJobReference.
