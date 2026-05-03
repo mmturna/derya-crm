@@ -1,56 +1,84 @@
-# Derya Freight OS — 1-min demo
+# Derya Freight OS — Demo
 
-One continuous narrative. No cuts. ~60 seconds.
+## Real data vs dummy data?
 
-## The deal
+**Use dummy data for the demo video.** Reasons:
 
-**Soybean meal procurement — 300 MT to Ashgabat.** Four suppliers replied to your RFQ in different countries.
+- Real Gmail has noise (security alerts, newsletters, bills) that doesn't tell a story.
+- Real threads aren't curated — supplier prices not parsed cleanly, missing ETAs, etc.
+- A demo needs a tight narrative arc; dummy data gives you full control of every beat.
+- Mention once on camera: *"this works on your real Gmail too — it's the same pipeline"* — that's enough to imply scale.
 
-## Pre-record setup (one-time)
+**Use real data only** if your company is bidding for a specific procurement contract and the audience wants to see THEIR commodity end-to-end. Otherwise dummy.
 
-In agent chat, type:
-> consolidate all open procurement under one deal — 300 MT soybean meal to Ashgabat
-
-Then in the inbox header, type `hide unrelated` to clear noise.
+You can have both: a polished 60s dummy-data video for marketing, and a longer "here's our actual pipeline" for sales follow-ups.
 
 ---
 
-## Script (60s)
+# 60-second script — Automated FORWARDING engine
 
-**0:00 — Inbox** *(`/dashboard/inbox`)*
-> "An operator gets dozens of supplier emails per day. Without context they're a queue of hundreds. With Derya, they're a workflow."
+A customer asks for a shipping rate. The platform handles ingestion, carrier RFQs, rate comparison, booking, milestone tracking, and customer updates. Operator clicks ~5 times.
 
-Hover the **Linked to a load** count. *AI auto-classified and attached every reply to the right deal.*
+## Pre-record setup (one-time, in agent chat)
 
-**0:08 — Open the procurement deal** *(click the soybean meal RFQ card)*
-> "Four suppliers, side-by-side. Price, qty, origin, incoterms, payment, lead time — all parsed from the email bodies."
+```
+consolidate all open forwarding under one deal — 1x40HC Constanta to Hamburg, electronics
+```
 
-Type `45` into the **+ freight** input. Table re-ranks by **landed cost**.
-> "Add freight, ranking flips. Cheapest unit price isn't always the cheapest landed."
+Then `hide unrelated` to clear noise.
 
-**0:22 — Counter-offer**
-Click **Counter** on a high-priced row. Type `5% under best`. Click Draft → modal opens with a polite negotiation email referencing market context. Click **Send.**
-> "AI drafts. Operator approves. Gmail delivers."
+---
 
-**0:36 — Award + auto-spinoff**
-Click **Award** on the cheapest landed supplier. Confirm.
-> "Procurement closed. Forwarding job auto-created — origin pre-filled to the supplier's port, destination Ashgabat."
+## Script (60s, single take)
 
-Click the ↓ Spinoff link to open the new forwarding job.
+**0:00 — Customer RFQ arrives**
+*(Open `/dashboard/inbox`)*
+> "A customer emails asking for a Constanta-to-Hamburg rate. The AI reads it, classifies it as an RFQ, parses origin/destination/weight/incoterms, and creates the load."
 
-**0:48 — Agent does the rest**
-In the right-rail chat:
-> populate the load details from the emails
+Click the just-arrived RFQ thread → opens `/dashboard/rfq/<id>`. Show the parsed fields already filled in.
 
-Watch the job fields fill in. Then:
+**0:08 — Convert to job + carrier outreach**
+Click **Create Job from RFQ**. Job appears in the **Forwarding** kanban under *Inquiry*.
+
+In the agent chat (right rail):
+> request rates from Maersk, MSC, and CMA CGM
+
+> "AI drafts three carrier RFQ emails — same load, polite tone, asks for 40HC + transit. Operator approves, hits send. Three emails go out via Gmail."
+
+**0:20 — Rates flow in**
+Skip 30 seconds of "imaginary time." *(In the demo, replies are pre-seeded.)*
+> "Carriers reply over the next hour. Each reply is auto-classified, the rate is extracted, and added to the job's rate table."
+
+Open the job. Show **Carrier rates** card with three rows ranked by total cost — fastest transit shown alongside.
+
+In agent:
+> summarize rates
+
+Agent ranks them, flags the cheapest as **BEST**.
+
+**0:32 — Pick winner + customer quote**
+> select MSC
+
+> "MSC selected. Job moves to Quoted. AI drafts the customer quote email with markup applied — operator can edit margin."
+
+Click **Send quote PDF** (or accept the AI-drafted quote email). Job advances to *Quoted*.
+
+**0:42 — Booked + customer portal**
+Customer accepts (pre-seed an inbound "yes proceed" email).
+
 > mark this booked
 
-Status advances. *Customer auto-emailed via Gmail with a live portal link.*
+Job moves to *Booked*. **Customer auto-emailed** with the live portal link. Click **Customer portal** button → public read-only page renders pipeline + ETD/ETA.
 
-Click **Customer portal** → public read-only page renders.
+**0:50 — Milestones + docs**
+> log BL issued today
 
-**0:58 — Close**
-> "Your inbox knows what your jobs are. Your jobs know what your customer sees."
+Milestone confirmed. Customer gets another auto-email. Drop a `BL.pdf` into the email thread (pre-seeded) — it auto-classifies and attaches to the job's BL slot.
+
+**0:56 — Close**
+> "Operator clicked five times. The platform handled ingestion, three carrier RFQs, rate comparison, customer quote, booking, milestones, customer notifications, and document classification."
+
+> "**One operator can run 50 loads instead of 10.**"
 
 ---
 
@@ -58,10 +86,11 @@ Click **Customer portal** → public read-only page renders.
 
 - **Discard** (destructive)
 - **Rotate link** (breaks shared URLs)
-- **Merge duplicates** mid-demo (do it through the agent for show)
+- **Merge duplicates** mid-demo
 
 ## Recording tips
 
-- 1440p+ (small table text)
+- 1440p+ (table text is small)
 - Pre-warm Vercel: hit `/dashboard` once before recording
 - Cursor highlight overlay
+- Single take — the strength is the continuous narrative
