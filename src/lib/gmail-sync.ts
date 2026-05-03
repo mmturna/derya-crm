@@ -7,6 +7,7 @@ import { getValidAccessToken } from "./gmail-oauth";
 import { classifyInboundEmail } from "./email-classifier";
 import { autoCreateInquiryFromThread } from "./thread-actions";
 import { ensureProposedJobsForOpenInquiries } from "./job-actions";
+import { classifyEmailAttachments } from "./doc-classify";
 
 // Sync envelope: how many threads max we'll touch in one run, and how far back
 // to look. Each thread is one Gmail API call regardless of how many messages
@@ -303,6 +304,24 @@ async function _syncEmailAccountInternal({ accountId, officeId }: { accountId: s
 
   // Backfill PROPOSED jobs for any open inquiry that doesn't have one yet.
   await ensureProposedJobsForOpenInquiries(account.officeId);
+
+  // Auto-classify any new email attachments into JobDocuments on linked jobs.
+  // Limited to active (non-DELIVERED) jobs that received new messages this run.
+  const jobsTouched = await prisma.job.findMany({
+    where: {
+      officeId: account.officeId,
+      status: { notIn: ["DELIVERED", "CANCELLED"] },
+      OR: [
+        { emailThreads: { some: { id: { in: touchedThreadDbIds } } } },
+        { inquiry: { emailThreads: { some: { id: { in: touchedThreadDbIds } } } } },
+      ],
+    },
+    select: { id: true },
+    take: 30,
+  });
+  for (const j of jobsTouched) {
+    try { await classifyEmailAttachments({ jobId: j.id, officeId: account.officeId }); } catch {}
+  }
 
   await prisma.emailAccount.update({
     where: { id: accountId },

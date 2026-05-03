@@ -8,6 +8,7 @@ import { populateJobFromEmails } from "@/lib/job-populate";
 import { mergeAllOpenInquiriesIntoOne, consolidateDuplicateInquiries } from "@/lib/merge-actions";
 import { awardSupplier, draftReplyToMessage } from "@/lib/sourcing-award";
 import { extractActionFromMessage, applyEditJob, applyMoveStage, applyAddMilestone } from "@/lib/agent-actions";
+import { findStuckJobs } from "@/lib/stuck-jobs";
 
 export type ChatMsg = { role: "user" | "assistant"; content: string };
 
@@ -38,6 +39,7 @@ Your job:
     8. Edit a job's fields directly (when scoped to a job): "set ETD to May 20", "weight is 18 tons", "incoterms CIF", "the supplier is HONEY OTOMOTIV". Multi-field updates work in one message.
     9. Move a job to a new stage: "mark this booked", "this is in transit now", "move to customs", "we received it".
     10. Log a milestone: "log that BL was issued today", "ETA confirmed for May 22", "cargo ready next Tuesday". Type and date are extracted from the message.
+    11. Show stuck/stale jobs: "what's stuck", "stale jobs", "what needs attention". Returns up to 8 jobs that haven't moved in 5+ days, each with an AI-suggested next action.
   Never tell the user you "can't create / can't merge / it's a workflow they need to do manually" — these actions exist. If the request is ambiguous, run the action you think is closest and report what changed.`;
 
 const RFQ_KEYWORDS = /\b(FCL|LCL|RFQ|quote|shipment|container|ETD|ETA|freight|cargo|BL|TEU|shipping|Incoterms|EXW|FOB|DAP|DDP|forwarder|carrier|ocean|airfreight|trucking)\b/i;
@@ -249,6 +251,21 @@ export async function chatWithAgent(history: ChatMsg[], userMessage: string, sco
     return {
       reply: `Captured RFQ "${subject}" in the inbox. AI parsing didn't return clean JSON — open the RFQ to fill fields manually.`,
       ingestedInquiryId: inquiry.id,
+    };
+  }
+
+  // Branch 1.25: "What's stuck?" / "stale jobs" / "what needs attention" — radar.
+  if (/\b(stuck|stale|stagnant|sitting|need.*attention|haven'?t moved|frozen)\b/i.test(userMessage)
+      && /\b(job|jobs|deal|deals|load|loads|pipeline)\b/i.test(userMessage)) {
+    const stuck = await findStuckJobs(session.officeId, { daysThreshold: 5, max: 8 });
+    if (stuck.length === 0) {
+      return { reply: "Pipeline looks healthy — no jobs older than 5 days without activity." };
+    }
+    const lines = stuck.map((s) =>
+      `· ${s.reference} (${s.customer ?? "no customer"}, ${s.daysStuck}d stale) — ${s.suggestion}`
+    );
+    return {
+      reply: `${stuck.length} stuck job${stuck.length === 1 ? "" : "s"}:\n\n${lines.join("\n")}`,
     };
   }
 

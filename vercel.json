@@ -7,6 +7,10 @@
     {
       "path": "/api/cron/gmail-sync",
       "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/stuck-jobs",
+      "schedule": "0 7 * * *"
     }
   ]
 }
