@@ -71,16 +71,18 @@ export async function seedDemoLoad(args: { officeId: string }): Promise<{ ok: tr
   });
   if (existing) return { ok: true, jobId: existing.id, reference: existing.reference, created: false };
 
-  // Customer
+  // Customer — name starts with "DEMO" so it's visually obvious this is a
+  // staged record vs the operator's real customers.
+  const demoCompanyName = "DEMO · Black Sea Trading Co";
   let company = await prisma.company.findFirst({
-    where: { officeId: args.officeId, name: "Black Sea Trading Co" },
+    where: { officeId: args.officeId, name: demoCompanyName },
     select: { id: true },
   });
   if (!company) {
     company = await prisma.company.create({
       data: {
         officeId: args.officeId,
-        name: "Black Sea Trading Co",
+        name: demoCompanyName,
         status: "WORKED",
         class1: "Active",
         class2: "B",
@@ -97,7 +99,7 @@ export async function seedDemoLoad(args: { officeId: string }): Promise<{ ok: tr
     data: {
       officeId: args.officeId,
       companyId: company.id,
-      subject: "Steel coils — Constanta to Hamburg, 1x40HC",
+      subject: "DEMO · Steel coils — Constanta to Hamburg, 1x40HC",
       fromEmail: "ops@blackseatrading.example",
       fromCompany: "Black Sea Trading Co",
       type: "FORWARDING",

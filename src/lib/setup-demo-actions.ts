@@ -24,6 +24,26 @@ export async function consolidateAshgabatSoybeanLoad(): Promise<
 > {
   const session = await requireSession();
 
+  // Pre-pass: any SOURCING inquiry currently linked to a JOB whose status is
+  // NOT a real load (i.e. PROPOSED, or no job at all) gets demoted so the
+  // merge below can pick it up. Also un-confirms any PROPOSED job that
+  // was set as "active" by accident — only the keeper should remain a real
+  // load. We treat anything in INGESTED/PARSED/PRICED/QUOTED as fair game.
+  const presentInquiries = await prisma.inquiry.findMany({
+    where: {
+      officeId: session.officeId,
+      type: "SOURCING",
+      status: { in: ["INGESTED", "PARSED", "PRICED", "QUOTED"] },
+    },
+    select: { id: true, job: { select: { id: true, status: true } } },
+  });
+  for (const inq of presentInquiries) {
+    if (inq.job && inq.job.status !== "PROPOSED") {
+      // Demote to PROPOSED so it can merge cleanly.
+      await prisma.job.update({ where: { id: inq.job.id }, data: { status: "PROPOSED" } });
+    }
+  }
+
   // First, run the AI-driven merge with explicit specs.
   const merge = await mergeAllOpenInquiriesIntoOne({
     type: "SOURCING",

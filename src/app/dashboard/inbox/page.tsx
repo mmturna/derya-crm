@@ -11,6 +11,7 @@ import { BulkCheckbox } from "@/components/bulk-checkbox";
 import { BulkActionBar } from "@/components/bulk-action-bar";
 import { LoadFilterPicker } from "@/components/load-filter-picker";
 import { RfqRowActions } from "@/components/rfq-row-actions";
+import { SeedDemoButton } from "@/components/seed-demo-button";
 
 const FILTERS = [
   { key: "",                  label: "Active"          },  // default — excludes hidden + snoozed
@@ -330,6 +331,7 @@ export default async function InboxPage({
           })}
         />
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <SeedDemoButton />
           <MergeDuplicatesButton />
           <ReclassifyButton onlyUnclassified={false} />
           <a href="/dashboard/settings/email" className="btn btn-secondary" style={{ fontSize: 13, textDecoration: "none" }}>
