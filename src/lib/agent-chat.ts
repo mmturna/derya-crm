@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { requireSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { populateJobFromEmails } from "@/lib/job-populate";
+import { extractSourcingOffersForInquiry } from "@/lib/sourcing-offers";
 import { mergeAllOpenInquiriesIntoOne, consolidateDuplicateInquiries } from "@/lib/merge-actions";
 import { awardSupplier, draftReplyToMessage } from "@/lib/sourcing-award";
 import {
@@ -55,6 +56,7 @@ Your job:
     17. Set cost (carrier/supplier expense): "cost is $8,200".
     18. Add a quote line: "add a line: customs clearance, $200".
     19. Delete this job: only when the user EXPLICITLY says "delete this job" / "remove this job" / "kill this job".
+    20. Summarize supplier offers (SOURCING) or carrier rates (FORWARDING) for the focused job: "summary of best rates", "what are the supplier offers", "compare prices", "what's cheapest". The system extracts offers from emails on the fly if needed and ranks them.
   These actions execute server-side. The reply you see is the actual result.
   Never tell the user you "can't create / can't merge / it's a workflow they need to do manually" — these actions exist. If the request is ambiguous, run the action you think is closest and report what changed.`;
 
@@ -659,6 +661,121 @@ export async function chatWithAgent(history: ChatMsg[], userMessage: string, sco
     if ("error" in r) return { reply: `Couldn't draft: ${r.error}` };
     return { reply: `Drafted a reply${r.replyTo ? ` to ${r.replyTo}` : ""}:\n\n${r.draft}` };
   }
+  if (aiIntent.intent === "summarize-offers" && scopedJob?.inquiryId) {
+    let inquiry = await prisma.inquiry.findFirst({
+      where: { id: scopedJob.inquiryId },
+      include: {
+        emailThreads: { include: { messages: { orderBy: { sentAt: "desc" }, take: 1 } } },
+      },
+    });
+    if (!inquiry) return { reply: "Couldn't find the linked inquiry." };
+    if (inquiry.emailThreads.length === 0) {
+      return { reply: "No supplier email threads linked to this procurement job yet. Sync the inbox or link threads from the Inbox page." };
+    }
+
+    // If most threads have no parsed offer yet, extract first.
+    const parsedCount = inquiry.emailThreads.filter((t) => !!t.supplierOffer).length;
+    if (parsedCount < inquiry.emailThreads.length / 2) {
+      try {
+        await extractSourcingOffersForInquiry(scopedJob.inquiryId);
+        // Re-fetch after extraction
+        inquiry = await prisma.inquiry.findFirst({
+          where: { id: scopedJob.inquiryId },
+          include: { emailThreads: { include: { messages: { orderBy: { sentAt: "desc" }, take: 1 } } } },
+        });
+      } catch { /* keep going with whatever we have */ }
+    }
+
+    type OfferRow = {
+      supplier: string; price?: number; currency?: string; unit?: string;
+      qty?: string; incoterms?: string; payment?: string; lead?: string; valid?: string; origin?: string;
+    };
+    const rows: OfferRow[] = [];
+    for (const t of inquiry?.emailThreads ?? []) {
+      let o: any = {};
+      if (t.supplierOffer) { try { o = JSON.parse(t.supplierOffer); } catch {} }
+      const fallbackName = t.messages[0]?.fromName ?? t.messages[0]?.fromEmail ?? "Supplier";
+      rows.push({
+        supplier: o.supplierName ?? fallbackName,
+        price: typeof o.pricePerUnit === "number" ? o.pricePerUnit : undefined,
+        currency: o.currency,
+        unit: o.unit,
+        qty: o.qtyAvailable,
+        incoterms: o.incoterms,
+        payment: o.paymentTerms,
+        lead: o.leadTime,
+        valid: o.validity,
+        origin: o.origin,
+      });
+    }
+    const priced = rows.filter((r) => r.price != null).sort((a, b) => (a.price! - b.price!));
+    const unpriced = rows.filter((r) => r.price == null);
+
+    if (priced.length === 0 && unpriced.length === 0) {
+      return { reply: "Threads are linked but no supplier terms parsed yet. Click 'Re-extract with AI' on the procurement RFQ page." };
+    }
+
+    const lines: string[] = [];
+    lines.push(`${priced.length + unpriced.length} supplier${priced.length + unpriced.length === 1 ? "" : "s"} on this deal — ${inquiry?.commodity ?? "soybean meal"}${inquiry?.destination ? ` to ${inquiry.destination}` : ""}.`);
+    lines.push("");
+    if (priced.length > 0) {
+      lines.push("Ranked by price (cheapest first):");
+      priced.forEach((r, i) => {
+        const tag = i === 0 ? " ← BEST" : "";
+        const priceStr = `${r.currency ?? ""} ${r.price!.toLocaleString()}${r.unit ? `/${r.unit}` : ""}`;
+        const meta = [
+          r.qty ? `qty ${r.qty}` : null,
+          r.incoterms,
+          r.origin ? `origin ${r.origin}` : null,
+          r.lead ? `lead ${r.lead}` : null,
+          r.payment ? `terms ${r.payment}` : null,
+        ].filter(Boolean).join(" · ");
+        lines.push(`${i + 1}. ${r.supplier} — ${priceStr}${tag}`);
+        if (meta) lines.push(`   ${meta}`);
+      });
+    }
+    if (unpriced.length > 0) {
+      lines.push("");
+      lines.push(`${unpriced.length} supplier${unpriced.length === 1 ? "" : "s"} corresponding but no firm price yet:`);
+      unpriced.forEach((r) => lines.push(`· ${r.supplier}${r.lead ? ` (lead ${r.lead})` : ""}`));
+    }
+    if (priced.length > 0) {
+      lines.push("");
+      lines.push(`Tell me "award the cheapest" or "go with ${priced[0].supplier}" to lock it in.`);
+    }
+    return { reply: lines.join("\n") };
+  }
+
+  if (aiIntent.intent === "summarize-rates" && scopedJob?.inquiryId) {
+    const inquiry = await prisma.inquiry.findFirst({
+      where: { id: scopedJob.inquiryId },
+      include: { carrierQuotes: { orderBy: { createdAt: "asc" } } },
+    });
+    if (!inquiry || inquiry.carrierQuotes.length === 0) {
+      return { reply: `No carrier rates received yet for ${scopedJob.reference}. The agent watches for replies as they arrive — once a carrier responds, ask again and I'll rank them.` };
+    }
+    const received = inquiry.carrierQuotes.filter((q) => q.status === "RECEIVED");
+    const pending = inquiry.carrierQuotes.filter((q) => q.status !== "RECEIVED");
+    const ranked = [...received].sort((a, b) => {
+      const ap = a.total40HC ?? a.total40 ?? a.total20 ?? Infinity;
+      const bp = b.total40HC ?? b.total40 ?? b.total20 ?? Infinity;
+      return ap - bp;
+    });
+    const lines: string[] = [];
+    lines.push(`${ranked.length} carrier rate${ranked.length === 1 ? "" : "s"} received${pending.length ? ` (${pending.length} still pending)` : ""}.`);
+    lines.push("");
+    ranked.forEach((q, i) => {
+      const total = q.total40HC ?? q.total40 ?? q.total20;
+      const tag = i === 0 ? " ← BEST" : "";
+      lines.push(`${i + 1}. ${q.carrier} — $${(total ?? 0).toLocaleString()} ${q.transitDays ? `· ${q.transitDays}d` : ""}${q.service ? ` · ${q.service}` : ""}${tag}`);
+    });
+    if (pending.length > 0) {
+      lines.push("");
+      lines.push(`Pending: ${pending.map((p) => p.carrier).join(", ")}.`);
+    }
+    return { reply: lines.join("\n") };
+  }
+
   if (aiIntent.intent === "award-supplier" && scopedJob && scopedJob.type === "SOURCING") {
     const inquiry = await prisma.inquiry.findFirst({
       where: { id: scopedJob.inquiryId ?? "" },
@@ -697,33 +814,58 @@ export async function chatWithAgent(history: ChatMsg[], userMessage: string, sco
       where: { id: scopeJobId, officeId: session.officeId },
       include: {
         company: { select: { name: true } },
-        inquiry: { include: { carrierQuotes: true } },
+        inquiry: {
+          include: {
+            carrierQuotes: true,
+            emailThreads: { select: { supplierOffer: true, awardedAt: true, subject: true } },
+          },
+        },
         documents: true,
         milestones: true,
       },
     });
     if (job) {
+      const procurement = job.type === "SOURCING";
       const margin = job.revenue && job.cost ? `${(((job.revenue - job.cost) / job.revenue) * 100).toFixed(0)}%` : "—";
-      const quotes = job.inquiry?.carrierQuotes
-        .map((q) => `  - ${q.carrier}: ${q.status === "RECEIVED" ? `$${(q.total40HC ?? q.total40 ?? q.total20 ?? 0).toLocaleString()}, ${q.transitDays ?? "?"}d` : "pending"}`)
-        .join("\n") ?? "  (none)";
       const milestones = job.milestones
         .map((m) => `  - ${m.type}: ${m.actualAt ? `confirmed ${m.actualAt.toISOString().split("T")[0]}` : m.plannedAt ? `planned ${m.plannedAt.toISOString().split("T")[0]}` : "not set"}`)
         .join("\n") || "  (none)";
       const docs = job.documents
         .map((d) => `  - ${d.name}: ${d.status.toLowerCase()}`)
         .join("\n") || "  (none)";
+
+      // For SOURCING jobs, show supplier offers from each linked thread.
+      // For FORWARDING, show carrier quotes (existing behavior).
+      let quotesBlock: string;
+      if (procurement) {
+        const offers = (job.inquiry?.emailThreads ?? []).map((t) => {
+          let o: any = {};
+          if (t.supplierOffer) { try { o = JSON.parse(t.supplierOffer); } catch {} }
+          const supplier = o.supplierName ?? t.subject;
+          if (o.pricePerUnit != null) {
+            return `  - ${supplier}: ${o.currency ?? ""} ${o.pricePerUnit}/${o.unit ?? "unit"} ${o.incoterms ?? ""}${o.qtyAvailable ? ` (qty ${o.qtyAvailable})` : ""}${o.leadTime ? ` lead ${o.leadTime}` : ""}${t.awardedAt ? "  ★ AWARDED" : ""}`;
+          }
+          return `  - ${supplier}: corresponding, no firm price yet`;
+        });
+        quotesBlock = `Supplier offers (${offers.length}):\n${offers.join("\n") || "  (none)"}`;
+      } else {
+        const quotes = job.inquiry?.carrierQuotes
+          .map((q) => `  - ${q.carrier}: ${q.status === "RECEIVED" ? `$${(q.total40HC ?? q.total40 ?? q.total20 ?? 0).toLocaleString()}, ${q.transitDays ?? "?"}d` : "pending"}`)
+          .join("\n") ?? "  (none)";
+        quotesBlock = `Carrier quotes:\n${quotes}`;
+      }
+
       scopedCtx = `
 
 THE USER IS FOCUSED ON THIS JOB. Ground every answer in this job unless they ask about something else.
+${procurement ? "This is a PROCUREMENT (SOURCING) job — the office is buying a commodity for the customer. Pricing comes from SUPPLIER OFFERS, NOT carrier quotes." : "This is a FORWARDING job — pricing comes from carrier quotes."}
 
 ${job.reference} | ${job.company?.name ?? "no customer"} | ${job.origin ?? "?"} → ${job.destination ?? "?"} | ${job.mode ?? "—"} | ${job.status}
 Revenue: ${job.revenue ? `$${job.revenue.toLocaleString()}` : "—"} | Cost: ${job.cost ? `$${job.cost.toLocaleString()}` : "—"} | Margin: ${margin}
 ETD: ${job.etd ? job.etd.toISOString().split("T")[0] : "—"} | ETA: ${job.eta ? job.eta.toISOString().split("T")[0] : "—"}
 ${job.commodity ? `Commodity: ${job.commodity}` : ""}${job.weight ? ` | ${job.weight}kg` : ""}${job.volume ? ` | ${job.volume}cbm` : ""}${job.incoterms ? ` | ${job.incoterms}` : ""}
 
-Carrier quotes:
-${quotes}
+${quotesBlock}
 
 Milestones:
 ${milestones}

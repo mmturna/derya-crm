@@ -18,6 +18,8 @@ export type AgentIntent =
   | { intent: "stuck-jobs" }
   | { intent: "morning-brief" }
   | { intent: "hide-unrelated" }
+  | { intent: "summarize-offers"; sortBy?: "price" | "landed" | "lead-time" }
+  | { intent: "summarize-rates" }
   | { intent: "chat" };
 
 export async function classifyAgentIntent(args: {
@@ -53,6 +55,8 @@ Action verbs (intents):
 - "stuck-jobs" — list stale jobs. "what's stuck", "stale jobs", "what needs attention".
 - "morning-brief" — pipeline snapshot. "morning briefing", "what's on my plate", "state of pipeline", "daily digest".
 - "hide-unrelated" — bulk hide noise threads. "hide unrelated", "dismiss the noise", "clean up the inbox".
+- "summarize-offers" — scoped to a SOURCING job: list all supplier offers ranked by price/landed cost. Triggers: "summary of the best rates", "what are the supplier offers", "what's the cheapest offer", "best price for this load", "compare supplier prices", "show me what suppliers quoted", "how much are they asking". Optional field "sortBy": "price" (default) | "landed" | "lead-time".
+- "summarize-rates" — scoped to a FORWARDING job: list carrier rate replies. Triggers: same as above but on a forwarding/shipping job.
 - "chat" — anything else. Questions, statements, ambiguous messages, or commands the agent can't execute.
 
 Rules:
@@ -82,12 +86,21 @@ Context:
   if (!valid.has(parsed.intent)) return { intent: "chat" };
 
   // Strip scope-required intents that don't have a job in scope.
-  if ((parsed.intent === "populate-load" || parsed.intent === "award-supplier" || parsed.intent === "draft-reply")
+  if ((parsed.intent === "populate-load" || parsed.intent === "award-supplier" ||
+       parsed.intent === "draft-reply" || parsed.intent === "summarize-offers" ||
+       parsed.intent === "summarize-rates")
       && !args.scopeJobId) {
     return { intent: "chat" };
   }
   if (parsed.intent === "award-supplier" && args.scopeJobType !== "SOURCING") {
     return { intent: "chat" };
+  }
+  if (parsed.intent === "summarize-offers" && args.scopeJobType !== "SOURCING") {
+    // Operator asked for offers but the job is forwarding — re-route.
+    return { intent: "summarize-rates" };
+  }
+  if (parsed.intent === "summarize-rates" && args.scopeJobType === "SOURCING") {
+    return { intent: "summarize-offers" };
   }
 
   if (parsed.intent === "merge-all-into-one") {
@@ -107,6 +120,9 @@ Context:
   }
   if (parsed.intent === "draft-reply") {
     return { intent: "draft-reply", target: typeof parsed.target === "string" ? parsed.target : undefined };
+  }
+  if (parsed.intent === "summarize-offers") {
+    return { intent: "summarize-offers", sortBy: parsed.sortBy === "landed" || parsed.sortBy === "lead-time" ? parsed.sortBy : "price" };
   }
   return { intent: parsed.intent } as AgentIntent;
 }
