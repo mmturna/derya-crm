@@ -4,9 +4,23 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "./prisma";
 import { requireSession } from "./auth";
 
-async function nextJobReference(officeId: string): Promise<string> {
-  const count = await prisma.job.count({ where: { officeId } });
-  return `JOB-${new Date().getFullYear()}-${String(count + 1).padStart(3, "0")}`;
+// Generate the next job reference for an office. Counting rows is wrong:
+// when jobs are deleted, count + 1 collides with an existing reference. We
+// pull the max existing reference for this year and increment.
+export async function nextJobReference(officeId: string): Promise<string> {
+  const year = new Date().getFullYear();
+  const prefix = `JOB-${year}-`;
+  const existing = await prisma.job.findMany({
+    where: { officeId, reference: { startsWith: prefix } },
+    select: { reference: true },
+  });
+  let max = 0;
+  for (const j of existing) {
+    const tail = j.reference.slice(prefix.length);
+    const n = parseInt(tail, 10);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  return `${prefix}${String(max + 1).padStart(3, "0")}`;
 }
 
 // Create a PROPOSED-stage Job for an Inquiry that doesn't have one yet.

@@ -115,8 +115,8 @@ export async function approveConvertWithBestRate(inquiryId: string): Promise<voi
   const best = ranked[0]?.q;
   const cost = best ? (best.total40HC ?? best.total40 ?? best.total20) : null;
 
-  const count = await prisma.job.count({ where: { officeId: session.officeId } });
-  const reference = `JOB-${new Date().getFullYear()}-${String(count + 1).padStart(3, "0")}`;
+  const { nextJobReference } = await import("@/lib/job-actions");
+  const reference = await nextJobReference(session.officeId);
 
   const job = await prisma.job.create({
     data: {

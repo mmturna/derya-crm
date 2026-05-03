@@ -7,8 +7,8 @@ async function createJob(formData: FormData) {
   "use server";
   const session = await requireSession();
 
-  const count = await prisma.job.count({ where: { officeId: session.officeId } });
-  const reference = `JOB-${new Date().getFullYear()}-${String(count + 1).padStart(3, "0")}`;
+  const { nextJobReference } = await import("@/lib/job-actions");
+  const reference = await nextJobReference(session.officeId);
 
   const companyId = String(formData.get("companyId") || "");
   const etd = formData.get("etd") ? new Date(String(formData.get("etd"))) : null;

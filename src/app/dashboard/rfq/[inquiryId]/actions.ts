@@ -14,9 +14,10 @@ export async function convertToJob(inquiryId: string, formData: FormData) {
   });
   if (!inquiry) throw new Error("Inquiry not found");
 
-  // Generate reference
-  const count = await prisma.job.count({ where: { officeId: session.officeId } });
-  const reference = `JOB-${new Date().getFullYear()}-${String(count + 1).padStart(3, "0")}`;
+  // Generate reference (max-existing+1, not count+1 — gaps from deletions
+  // would collide).
+  const { nextJobReference } = await import("@/lib/job-actions");
+  const reference = await nextJobReference(session.officeId);
 
   const companyId = formData.get("companyId") ? String(formData.get("companyId")) : inquiry.companyId ?? undefined;
 

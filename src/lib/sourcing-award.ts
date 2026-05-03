@@ -82,8 +82,8 @@ export async function awardSupplier(threadId: string): Promise<
         childForwardingJobId = existingChild.id;
       } else {
         // Generate a sibling JOB-ref.
-        const count = await prisma.job.count({ where: { officeId: procurement.officeId } });
-        const reference = `JOB-${new Date().getFullYear()}-${String(count + 1).padStart(3, "0")}`;
+        const { nextJobReference } = await import("./job-actions");
+        const reference = await nextJobReference(procurement.officeId);
         const supplierOrigin = typeof offer.origin === "string" ? offer.origin : null;
         const supplierIncoterms = typeof offer.incoterms === "string" ? offer.incoterms : null;
         const created = await prisma.job.create({

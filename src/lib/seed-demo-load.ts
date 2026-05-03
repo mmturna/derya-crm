@@ -119,9 +119,10 @@ export async function seedDemoLoad(args: { officeId: string }): Promise<{ ok: tr
     },
   });
 
-  // Job — set up like a mid-pipeline shipment
-  const count = await prisma.job.count({ where: { officeId: args.officeId } });
-  const reference = `JOB-${new Date().getFullYear()}-${String(count + 1).padStart(3, "0")}`;
+  // Job — set up like a mid-pipeline shipment.
+  // Reference must be next-available (not count+1) — see nextJobReference.
+  const { nextJobReference } = await import("./job-actions");
+  const reference = await nextJobReference(args.officeId);
   const portalToken = crypto.randomBytes(16).toString("hex");
   const etd = new Date(Date.now() + 6 * 86400000);
   const eta = new Date(Date.now() + 16 * 86400000);
