@@ -6,14 +6,16 @@ import { ThreadAccordion } from "@/components/thread-accordion";
 import { MergeDuplicatesButton } from "@/components/merge-duplicates-button";
 import { InboxQuickReply } from "@/components/inbox-quick-reply";
 import { HideThreadButton } from "@/components/hide-thread-button";
+import { SnoozeThreadButton } from "@/components/snooze-thread-button";
 
 const FILTERS = [
-  { key: "",                  label: "Active"          },  // default — excludes hidden
+  { key: "",                  label: "Active"          },  // default — excludes hidden + snoozed
   { key: "_NEEDS_REPLY",      label: "Awaiting reply"  },
   { key: "_UNLINKED",         label: "Unlinked"        },
   { key: "_LINKED",           label: "Linked to a load"},
+  { key: "_SNOOZED",          label: "Snoozed"         },
   { key: "_HIDDEN",           label: "Hidden"          },
-  { key: "_ALL",              label: "All (incl hidden)"},
+  { key: "_ALL",              label: "All"             },
 ] as const;
 
 function timeAgo(d: Date) {
@@ -71,29 +73,32 @@ export default async function InboxPage({
 
   // Threads with messages, plus their linked job/inquiry
   const where: any = { officeId: session.officeId };
-  // Default ("Active") excludes hidden. Other filters opt-in.
+  const now = new Date();
+  // Default ("Active") excludes hidden + currently-snoozed threads. Other filters opt-in.
   if (filter === "_HIDDEN") {
     where.hiddenAt = { not: null };
+  } else if (filter === "_SNOOZED") {
+    where.snoozedUntil = { gt: now };
   } else if (filter === "_ALL") {
-    // no hidden filter
+    // no hidden/snoozed filter
   } else {
     where.hiddenAt = null;
+    where.AND = [
+      { OR: [{ snoozedUntil: null }, { snoozedUntil: { lte: now } }] },
+    ];
     if (filter === "_UNLINKED") {
       where.jobId = null;
       where.inquiryId = null;
     } else if (filter === "_LINKED") {
-      where.OR = [{ jobId: { not: null } }, { inquiryId: { not: null } }];
-    } else if (filter === "_NEEDS_REPLY") {
-      // We approximate this with a query then filter in JS post-fetch (cheap with take 60)
+      where.AND.push({ OR: [{ jobId: { not: null } }, { inquiryId: { not: null } }] });
     }
   }
   if (accountFilter) {
     where.messages = { some: { accountId: accountFilter } };
   }
   if (searchQuery) {
-    // Search across thread subject + any message body / sender / subject.
-    where.OR = [
-      ...(where.OR ?? []),
+    where.AND = where.AND ?? [];
+    where.AND.push({ OR: [
       { subject: { contains: searchQuery, mode: "insensitive" } },
       { messages: { some: {
         OR: [
@@ -103,7 +108,7 @@ export default async function InboxPage({
           { fromName: { contains: searchQuery, mode: "insensitive" } },
         ],
       } } },
-    ];
+    ] });
   }
 
   let threads = await prisma.emailThread.findMany({
@@ -126,10 +131,12 @@ export default async function InboxPage({
   }
 
   // Counts for the filter chips
-  const [totalActive, totalUnlinked, totalLinked, totalHidden, totalAll] = await Promise.all([
-    prisma.emailThread.count({ where: { officeId: session.officeId, hiddenAt: null } }),
-    prisma.emailThread.count({ where: { officeId: session.officeId, hiddenAt: null, jobId: null, inquiryId: null } }),
-    prisma.emailThread.count({ where: { officeId: session.officeId, hiddenAt: null, OR: [{ jobId: { not: null } }, { inquiryId: { not: null } }] } }),
+  const activeFilter = { hiddenAt: null, OR: [{ snoozedUntil: null }, { snoozedUntil: { lte: now } }] };
+  const [totalActive, totalUnlinked, totalLinked, totalSnoozed, totalHidden, totalAll] = await Promise.all([
+    prisma.emailThread.count({ where: { officeId: session.officeId, ...activeFilter } }),
+    prisma.emailThread.count({ where: { officeId: session.officeId, ...activeFilter, jobId: null, inquiryId: null } }),
+    prisma.emailThread.count({ where: { officeId: session.officeId, AND: [activeFilter, { OR: [{ jobId: { not: null } }, { inquiryId: { not: null } }] }] } }),
+    prisma.emailThread.count({ where: { officeId: session.officeId, snoozedUntil: { gt: now } } }),
     prisma.emailThread.count({ where: { officeId: session.officeId, hiddenAt: { not: null } } }),
     prisma.emailThread.count({ where: { officeId: session.officeId } }),
   ]);
@@ -146,6 +153,7 @@ export default async function InboxPage({
     if (key === "_NEEDS_REPLY") return totalNeedsReply;
     if (key === "_UNLINKED") return totalUnlinked;
     if (key === "_LINKED") return totalLinked;
+    if (key === "_SNOOZED") return totalSnoozed;
     if (key === "_HIDDEN") return totalHidden;
     if (key === "_ALL") return totalAll;
     return 0;
@@ -359,6 +367,7 @@ export default async function InboxPage({
                       </div>
                       <div style={{ display: "inline-flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
                         <InboxQuickReply threadId={t.id} threadSubject={t.subject} />
+                        <SnoozeThreadButton threadId={t.id} snoozedUntil={t.snoozedUntil ? t.snoozedUntil.toISOString() : null} />
                         <HideThreadButton threadId={t.id} hidden={!!t.hiddenAt} />
                       </div>
                     </div>
@@ -423,6 +432,7 @@ export default async function InboxPage({
                       {!linked && (
                         <CreateInquiryButton threadId={t.id} />
                       )}
+                      <SnoozeThreadButton threadId={t.id} snoozedUntil={t.snoozedUntil ? t.snoozedUntil.toISOString() : null} />
                       <HideThreadButton threadId={t.id} hidden={!!t.hiddenAt} />
                     </div>
                   </div>

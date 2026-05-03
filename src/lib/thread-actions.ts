@@ -381,3 +381,33 @@ export async function unhideThread(threadId: string): Promise<void> {
   });
   revalidatePath("/dashboard/inbox");
 }
+
+export async function snoozeThread(threadId: string, until: "4h" | "tomorrow" | "monday" | string): Promise<void> {
+  const session = await requireSession();
+  const found = await prisma.emailThread.findFirst({ where: { id: threadId, officeId: session.officeId } });
+  if (!found) return;
+  let dt: Date;
+  const now = new Date();
+  if (until === "4h") {
+    dt = new Date(now.getTime() + 4 * 3600 * 1000);
+  } else if (until === "tomorrow") {
+    dt = new Date(now); dt.setDate(dt.getDate() + 1); dt.setHours(9, 0, 0, 0);
+  } else if (until === "monday") {
+    dt = new Date(now);
+    const daysToMon = (1 - dt.getDay() + 7) % 7 || 7;
+    dt.setDate(dt.getDate() + daysToMon); dt.setHours(9, 0, 0, 0);
+  } else {
+    const parsed = new Date(until);
+    dt = isNaN(parsed.getTime()) ? new Date(now.getTime() + 24 * 3600 * 1000) : parsed;
+  }
+  await prisma.emailThread.update({ where: { id: threadId }, data: { snoozedUntil: dt } });
+  revalidatePath("/dashboard/inbox");
+}
+
+export async function unsnoozeThread(threadId: string): Promise<void> {
+  const session = await requireSession();
+  const found = await prisma.emailThread.findFirst({ where: { id: threadId, officeId: session.officeId } });
+  if (!found) return;
+  await prisma.emailThread.update({ where: { id: threadId }, data: { snoozedUntil: null } });
+  revalidatePath("/dashboard/inbox");
+}

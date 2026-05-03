@@ -597,6 +597,7 @@ model EmailThread {
   supplierOfferAt  DateTime? // when AI last extracted a supplier offer from this thread
   awardedAt        DateTime? // operator marked this supplier as winner of the sourcing deal
   hiddenAt         DateTime? // operator marked thread as not freight-related; hidden from default inbox
+  snoozedUntil     DateTime? // hidden from default inbox until this time
   lastMessageAt    DateTime @default(now())
   messageCount     Int      @default(0)
   createdAt        DateTime @default(now())
