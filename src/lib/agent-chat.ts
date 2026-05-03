@@ -22,6 +22,12 @@ When the user asks a question:
 - If the answer requires looking up data you don't already have (jobs, inquiries, threads, customers, supplier offers, carrier rates, milestones, etc.) — **call the right search/lookup tool first**, then answer.
 - Don't say "I don't see X in my view" — search for it. There are search_jobs, search_inquiries, search_companies, search_email_threads, get_job, list_open_inquiries, list_threads_awaiting_reply, list_stuck_jobs, summarize_supplier_offers, summarize_carrier_rates.
 
+**HARD RULE — never confuse pricing models:**
+- A SOURCING (procurement) job's pricing is **SUPPLIER OFFERS**, NOT carrier quotes. Suppliers are the parties selling the commodity. When the user asks about "rates" / "prices" / "offers" / "what we got" / "how much" on a SOURCING job, ALWAYS call summarize_supplier_offers — never mention carriers, never say "no carrier quotes yet."
+- A FORWARDING (logistics) job's pricing is **CARRIER QUOTES**. Carriers are shipping lines / trucking companies. Use summarize_carrier_rates here.
+- The focused job's type is in the scoped context below. Read it before answering.
+- If summarize_supplier_offers returns no offers, your reply should say "no supplier replies yet" — or if there are linked threads but no parsed prices, suggest running extract_supplier_offers / link_threads_to_job. NEVER say "no carrier quotes" on a SOURCING job. That's wrong vocabulary.
+
 When the user asks for an action (merge, award, populate, set, rename, edit, move stage, draft, hide, delete):
 - Call the matching tool. Don't ask permission unless the action is destructive (delete_job).
 - If the user is focused on a job, you don't need a job_id — the tool inherits scope.
@@ -91,15 +97,19 @@ async function buildScopedJobContext(jobId: string, officeId: string): Promise<s
   });
   if (!job) return "";
   const threadCount = job.inquiry?.emailThreads.length ?? 0;
+  const typeBlock = job.type === "SOURCING"
+    ? `**THIS IS A PROCUREMENT (SOURCING) JOB.** Pricing = SUPPLIER OFFERS, not carrier quotes. For any "rate / price / offer / cheapest" question, call summarize_supplier_offers. To attach related supplier emails, call link_threads_to_job. To pick a winner, call award_supplier. NEVER call summarize_carrier_rates here. NEVER say "no carrier quotes" — the operator is asking about SUPPLIER prices.`
+    : `**THIS IS A FORWARDING JOB.** Pricing = CARRIER QUOTES. For any "rate / price" question, call summarize_carrier_rates.`;
+
   return `
 
 FOCUSED JOB (the user is currently looking at this — operate on it by default):
 ${job.reference} (${job.type}) | ${job.company?.name ?? "no customer"} | ${job.origin ?? "?"} → ${job.destination ?? "?"} | ${job.mode ?? "—"} | ${job.status}
 Commodity: ${job.commodity ?? "—"} | Weight: ${job.weight ?? "—"}kg | Volume: ${job.volume ?? "—"}cbm
 Revenue: ${job.revenue ?? "—"} | Cost: ${job.cost ?? "—"} | ETD: ${job.etd?.toISOString().split("T")[0] ?? "—"} | ETA: ${job.eta?.toISOString().split("T")[0] ?? "—"}
-Inquiry id: ${job.inquiryId ?? "—"} | Linked threads: ${threadCount}
+Inquiry id: ${job.inquiryId ?? "—"} | Linked email threads: ${threadCount}
 
-For ${job.type === "SOURCING" ? "SOURCING jobs, use summarize_supplier_offers for pricing comparisons. Award flow uses award_supplier." : "FORWARDING jobs, use summarize_carrier_rates for pricing."}`;
+${typeBlock}`;
 }
 
 export async function chatWithAgent(history: ChatMsg[], userMessage: string, scopeJobId?: string): Promise<ChatResult> {
