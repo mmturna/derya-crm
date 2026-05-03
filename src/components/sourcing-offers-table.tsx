@@ -213,6 +213,8 @@ export function SourcingOffersTable({ inquiryId, rows }: { inquiryId: string; ro
           title={`Award confirmation — ${awardModal.supplierName}`}
           subtitle={awardModal.replyTo ? `To: ${awardModal.replyTo}` : ""}
           draft={awardModal.draft}
+          threadDbId={awardModal.threadId}
+          replyTo={awardModal.replyTo}
           onClose={() => setAwardModal(null)}
         />
       )}
@@ -221,6 +223,8 @@ export function SourcingOffersTable({ inquiryId, rows }: { inquiryId: string; ro
           title={`Reply draft — ${replyModal.supplierName}`}
           subtitle={replyModal.replyTo ? `To: ${replyModal.replyTo}` : ""}
           draft={replyModal.draft}
+          threadDbId={replyModal.threadId}
+          replyTo={replyModal.replyTo}
           onClose={() => setReplyModal(null)}
         />
       )}

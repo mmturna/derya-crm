@@ -106,6 +106,8 @@ export function InboxQuickReply({ threadId, threadSubject }: { threadId: string;
           title={`Reply draft — ${threadSubject}`}
           subtitle={draft.replyTo ? `To: ${draft.replyTo}` : ""}
           draft={draft.draft}
+          threadDbId={threadId}
+          replyTo={draft.replyTo}
           onClose={() => setDraft(null)}
         />
       )}

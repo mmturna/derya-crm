@@ -1,17 +1,51 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
+import { sendReplyToThread } from "@/lib/gmail-send";
 
 export function DraftModal({
   title, subtitle, draft, onClose,
-}: { title: string; subtitle?: string; draft: string; onClose: () => void }) {
+  threadDbId, replyTo,
+}: {
+  title: string;
+  subtitle?: string;
+  draft: string;
+  onClose: () => void;
+  /** If provided, "Send" button appears and uses Gmail send to deliver as a real reply. */
+  threadDbId?: string;
+  replyTo?: string | null;
+}) {
+  const router = useRouter();
   const [text, setText] = useState(draft);
+  const [busy, start] = useTransition();
   const [copied, setCopied] = useState(false);
+  const [status, setStatus] = useState<{ kind: "ok" | "err"; msg: string; needsReauth?: boolean } | null>(null);
 
   function copy() {
     navigator.clipboard.writeText(text).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  function send() {
+    if (!threadDbId) return;
+    if (!text.trim()) { setStatus({ kind: "err", msg: "Draft is empty" }); return; }
+    start(async () => {
+      setStatus(null);
+      const r = await sendReplyToThread({
+        threadDbId,
+        body: text,
+        replyTo: replyTo ?? undefined,
+      });
+      if ("error" in r) {
+        setStatus({ kind: "err", msg: r.error, needsReauth: r.needsReauth });
+        return;
+      }
+      setStatus({ kind: "ok", msg: "Sent" });
+      router.refresh();
+      setTimeout(onClose, 1200);
     });
   }
 
@@ -42,11 +76,25 @@ export function DraftModal({
             background: "var(--surface)", color: "var(--text)", resize: "vertical",
           }}
         />
-        <div style={{ padding: "12px 18px", borderTop: "1px solid var(--border)", display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <button onClick={onClose} className="btn btn-secondary btn-sm" style={{ fontSize: 12 }}>Close</button>
-          <button onClick={copy} className="btn btn-sm" style={{ fontSize: 12 }}>
-            {copied ? "Copied" : "Copy to clipboard"}
+        <div style={{ padding: "12px 18px", borderTop: "1px solid var(--border)", display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ fontSize: 11, color: status?.kind === "err" ? "var(--danger)" : "var(--text-3)", flex: 1, minWidth: 0 }}>
+            {status?.msg}
+            {status?.needsReauth && (
+              <>
+                {" "}
+                <a href="/dashboard/settings/email" style={{ color: "var(--brand)", fontWeight: 600 }}>Reconnect inbox →</a>
+              </>
+            )}
+          </div>
+          <button onClick={onClose} className="btn btn-secondary btn-sm" style={{ fontSize: 12 }} disabled={busy}>Close</button>
+          <button onClick={copy} className="btn btn-secondary btn-sm" style={{ fontSize: 12 }} disabled={busy}>
+            {copied ? "Copied" : "Copy"}
           </button>
+          {threadDbId && (
+            <button onClick={send} className="btn btn-sm" style={{ fontSize: 12 }} disabled={busy}>
+              {busy ? "Sending…" : status?.kind === "ok" ? "Sent ✓" : "Send"}
+            </button>
+          )}
         </div>
       </div>
     </div>
