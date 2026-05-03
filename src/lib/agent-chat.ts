@@ -9,6 +9,7 @@ import { mergeAllOpenInquiriesIntoOne, consolidateDuplicateInquiries } from "@/l
 import { awardSupplier, draftReplyToMessage } from "@/lib/sourcing-award";
 import { extractActionFromMessage, applyEditJob, applyMoveStage, applyAddMilestone } from "@/lib/agent-actions";
 import { findStuckJobs } from "@/lib/stuck-jobs";
+import { classifyAgentIntent } from "@/lib/agent-intent";
 
 export type ChatMsg = { role: "user" | "assistant"; content: string };
 
@@ -497,6 +498,109 @@ export async function chatWithAgent(history: ChatMsg[], userMessage: string, sco
     return {
       reply: `Populated load details from emails:\n${r.filled.map((f) => `· ${f}`).join("\n")}\n\nOpen the job to review or override any field.`,
     };
+  }
+
+  // Branch 1.9: AI safety-net intent classifier — runs only after every regex
+  // intent has missed. Catches phrasings the regexes don't anticipate, so the
+  // agent reliably executes verbs instead of hallucinating action results.
+  const scopedJob = scopeJobId ? await prisma.job.findFirst({
+    where: { id: scopeJobId, officeId: session.officeId },
+    select: { id: true, type: true, status: true, reference: true, inquiryId: true },
+  }) : null;
+  const aiIntent = await classifyAgentIntent({
+    userMessage,
+    scopeJobId,
+    scopeJobType: scopedJob ? (scopedJob.type === "SOURCING" ? "SOURCING" : "FORWARDING") : undefined,
+  });
+
+  if (aiIntent.intent === "merge-all-into-one") {
+    const r = await mergeAllOpenInquiriesIntoOne({ type: aiIntent.type });
+    if ("error" in r) return { reply: `Couldn't consolidate: ${r.error}` };
+    if (r.mergedCount === 0) return { reply: `Only one open inquiry exists — nothing to merge.` };
+    return { reply: `Consolidated ${r.mergedCount + 1} inquiries into one: "${r.subject}". Open the jobs board to confirm or rename.` };
+  }
+  if (aiIntent.intent === "dedup") {
+    const r = await consolidateDuplicateInquiries();
+    if ("error" in r) return { reply: `Couldn't dedupe: ${r.error}` };
+    if (r.merged === 0) return { reply: "No duplicates found across your open inquiries." };
+    return { reply: `Merged ${r.merged} duplicate inquiries into ${r.clusters} cleaned-up deal${r.clusters === 1 ? "" : "s"}.` };
+  }
+  if (aiIntent.intent === "needs-reply") {
+    const cands = await prisma.emailThread.findMany({
+      where: { officeId: session.officeId, hiddenAt: null },
+      include: { messages: { orderBy: { sentAt: "desc" }, take: 1 }, job: { select: { reference: true } }, inquiry: { select: { subject: true } } },
+      orderBy: { lastMessageAt: "desc" },
+      take: 80,
+    });
+    const awaiting = cands.filter((t) => t.messages[0]?.direction === "INBOUND").slice(0, 8);
+    if (awaiting.length === 0) return { reply: "Inbox zero — nothing waiting." };
+    const lines = awaiting.map((t) => `· "${t.subject}" — ${t.job?.reference ?? t.inquiry?.subject ?? "(unlinked)"} · last from ${t.messages[0].fromName ?? t.messages[0].fromEmail}`);
+    return { reply: `${awaiting.length} thread${awaiting.length === 1 ? "" : "s"} awaiting reply:\n\n${lines.join("\n")}` };
+  }
+  if (aiIntent.intent === "stuck-jobs") {
+    const stuck = await findStuckJobs(session.officeId, { daysThreshold: 5, max: 8 });
+    if (stuck.length === 0) return { reply: "Pipeline looks healthy — no jobs older than 5 days without activity." };
+    const lines = stuck.map((s) => `· ${s.reference} (${s.customer ?? "no customer"}, ${s.daysStuck}d) — ${s.suggestion}`);
+    return { reply: `${stuck.length} stuck job${stuck.length === 1 ? "" : "s"}:\n\n${lines.join("\n")}` };
+  }
+  if (aiIntent.intent === "hide-unrelated") {
+    const cands = await prisma.emailThread.findMany({
+      where: {
+        officeId: session.officeId, hiddenAt: null, jobId: null, inquiryId: null,
+        messages: { every: { OR: [{ classification: "OTHER" }, { classification: null }] } },
+      },
+      take: 100, select: { id: true },
+    });
+    if (cands.length === 0) return { reply: "No obvious noise threads to hide." };
+    await prisma.emailThread.updateMany({ where: { id: { in: cands.map((c) => c.id) } }, data: { hiddenAt: new Date() } });
+    revalidatePath("/dashboard/inbox");
+    return { reply: `Hid ${cands.length} unrelated thread${cands.length === 1 ? "" : "s"}.` };
+  }
+  if (aiIntent.intent === "populate-load" && scopeJobId) {
+    const r = await populateJobFromEmails(scopeJobId);
+    if ("error" in r) return { reply: `Couldn't populate: ${r.error}` };
+    if (r.filled.length === 0) return { reply: "Read the linked emails — nothing new to fill." };
+    return { reply: `Populated load:\n${r.filled.map((f) => `· ${f}`).join("\n")}` };
+  }
+  if (aiIntent.intent === "draft-reply" && scopedJob?.inquiryId) {
+    const thread = await prisma.emailThread.findFirst({
+      where: { inquiryId: scopedJob.inquiryId, officeId: session.officeId },
+      orderBy: { lastMessageAt: "desc" },
+      select: { id: true },
+    });
+    if (!thread) return { reply: "No email threads on this job yet — nothing to reply to." };
+    const r = await draftReplyToMessage({ threadId: thread.id, intent: aiIntent.target ?? userMessage });
+    if ("error" in r) return { reply: `Couldn't draft: ${r.error}` };
+    return { reply: `Drafted a reply${r.replyTo ? ` to ${r.replyTo}` : ""}:\n\n${r.draft}` };
+  }
+  if (aiIntent.intent === "award-supplier" && scopedJob && scopedJob.type === "SOURCING") {
+    const inquiry = await prisma.inquiry.findFirst({
+      where: { id: scopedJob.inquiryId ?? "" },
+      include: { emailThreads: true },
+    });
+    if (!inquiry) return { reply: "No linked inquiry to award against." };
+    const candidates = inquiry.emailThreads.map((t) => {
+      let offer: any = {};
+      try { if (t.supplierOffer) offer = JSON.parse(t.supplierOffer); } catch {}
+      return { id: t.id, subject: t.subject, offer };
+    });
+    let pick = null;
+    if (aiIntent.supplierHint) {
+      const hint = aiIntent.supplierHint.toLowerCase();
+      pick = candidates.find((c) =>
+        (typeof c.offer.supplierName === "string" && c.offer.supplierName.toLowerCase().includes(hint)) ||
+        c.subject.toLowerCase().includes(hint)
+      );
+    }
+    if (!pick) {
+      pick = candidates.filter((c) => typeof c.offer.pricePerUnit === "number")
+        .sort((a, b) => a.offer.pricePerUnit - b.offer.pricePerUnit)[0];
+    }
+    if (!pick) return { reply: "No supplier prices extracted yet — open the RFQ supplier table to award manually." };
+    const r = await awardSupplier(pick.id);
+    if ("error" in r) return { reply: `Couldn't award: ${r.error}` };
+    const name = pick.offer.supplierName || pick.subject;
+    return { reply: `Awarded to ${name}. Job moved to "Awarded" + child forwarding job spun up.\n\n--- Confirmation draft ---\n${r.emailDraft.slice(0, 600)}${r.emailDraft.length > 600 ? "…" : ""}` };
   }
 
   // Branch 2: Q&A with ops context (optionally scoped to a job)
