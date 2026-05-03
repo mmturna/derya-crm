@@ -1,5 +1,8 @@
-"use server";
-
+// Server-only module (NOT a "use server" file — that directive only allows
+// async-function exports, but we also export the TOOLS array constant).
+// The functions here are called from within other server actions, so they
+// run server-side regardless.
+import "server-only";
 import { revalidatePath } from "next/cache";
 import { prisma } from "./prisma";
 import { mergeAllOpenInquiriesIntoOne, consolidateDuplicateInquiries } from "./merge-actions";
