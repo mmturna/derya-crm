@@ -507,6 +507,9 @@ model Job {
   currency         String    @default("USD")
 
   notes            String?
+  portalToken      String?   @unique  // public magic-link token for /portal/[token]
+  notifyCustomer   Boolean   @default(true)  // auto-email customer on status/milestone changes
+  customerEmail    String?   // override for status-update emails; defaults to inquiry.fromEmail
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 

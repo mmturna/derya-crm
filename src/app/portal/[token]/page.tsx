@@ -26,17 +26,28 @@ export default async function PortalPage({
 }) {
   const { token } = await params;
 
-  // Token = job.id for MVP. CUIDs are unguessable enough for demo.
-  // TODO: replace with HMAC-signed token before production.
-  const job = await prisma.job.findUnique({
-    where: { id: token },
+  // Random per-job portalToken (128-bit hex). Falls back to id-as-token for any
+  // legacy demo links — production tokens are unguessable.
+  let job = await prisma.job.findUnique({
+    where: { portalToken: token },
     include: {
       company: { select: { name: true } },
       milestones: { orderBy: { createdAt: "asc" } },
-      documents: { where: { status: "APPROVED" }, orderBy: { createdAt: "asc" } },
+      documents: { where: { status: { in: ["APPROVED", "UPLOADED"] } }, orderBy: { createdAt: "asc" } },
       office: { select: { name: true } },
     },
   });
+  if (!job) {
+    job = await prisma.job.findUnique({
+      where: { id: token },
+      include: {
+        company: { select: { name: true } },
+        milestones: { orderBy: { createdAt: "asc" } },
+        documents: { where: { status: { in: ["APPROVED", "UPLOADED"] } }, orderBy: { createdAt: "asc" } },
+        office: { select: { name: true } },
+      },
+    });
+  }
 
   if (!job) notFound();
 

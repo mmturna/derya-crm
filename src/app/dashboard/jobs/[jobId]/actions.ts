@@ -3,15 +3,24 @@
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { requireSession } from "@/lib/auth";
+import { maybeNotifyCustomerOnStatusChange, maybeNotifyCustomerOnMilestone } from "@/lib/customer-notify";
 
 // ── Job status ────────────────────────────────────────────────────────────────
 
 export async function updateJobStatus(jobId: string, status: string) {
   const session = await requireSession();
+  const before = await prisma.job.findFirst({
+    where: { id: jobId, officeId: session.officeId },
+    select: { status: true },
+  });
   await prisma.job.update({
     where: { id: jobId, officeId: session.officeId },
     data: { status: status as never },
   });
+  if (before && before.status !== status) {
+    // Best-effort: don't block the UI if email send fails.
+    maybeNotifyCustomerOnStatusChange(jobId, before.status, status).catch(() => {});
+  }
   revalidatePath(`/dashboard/jobs/${jobId}`);
   revalidatePath("/dashboard/jobs");
   revalidatePath("/dashboard");
@@ -175,6 +184,7 @@ export async function markMilestoneActual(milestoneId: string) {
     where: { id: milestoneId },
     data: { actualAt: new Date() },
   });
+  maybeNotifyCustomerOnMilestone(ms.jobId, ms.type, true).catch(() => {});
   revalidatePath(`/dashboard/jobs/${ms.jobId}`);
 }
 

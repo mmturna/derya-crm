@@ -10,6 +10,7 @@ import {
 import { Icon } from "@/components/icon";
 import { PopulateJobButton } from "@/components/populate-job-button";
 import { SourcingOffersTable } from "@/components/sourcing-offers-table";
+import { PortalLinkButton } from "@/components/portal-link-button";
 
 const STATUS_ORDER = ["INQUIRY", "QUOTED", "BOOKED", "IN_TRANSIT", "CUSTOMS", "DELIVERED"] as const;
 const STATUS_LABEL: Record<string, string> = {
@@ -225,6 +226,7 @@ export default async function JobDetailPage({
           </div>
 
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+            <PortalLinkButton jobId={jobId} hasToken={!!job.portalToken} notifyCustomer={job.notifyCustomer} />
             <PopulateJobButton jobId={jobId} />
             <form action={async (fd: FormData) => {
               "use server";
