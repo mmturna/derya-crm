@@ -113,6 +113,17 @@ ${typeBlock}`;
 }
 
 export async function chatWithAgent(history: ChatMsg[], userMessage: string, scopeJobId?: string): Promise<ChatResult> {
+  try {
+    return await _chatWithAgentImpl(history, userMessage, scopeJobId);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const stack = e instanceof Error && e.stack ? e.stack.split("\n").slice(0, 4).join(" | ") : "";
+    console.error("[agent-chat] top-level failed:", msg, stack);
+    return { reply: `Agent error — ${msg.slice(0, 600)}${stack ? `\n\n${stack.slice(0, 400)}` : ""}` };
+  }
+}
+
+async function _chatWithAgentImpl(history: ChatMsg[], userMessage: string, scopeJobId?: string): Promise<ChatResult> {
   const session = await requireSession();
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
