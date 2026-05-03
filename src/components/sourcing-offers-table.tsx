@@ -40,6 +40,9 @@ export function SourcingOffersTable({ inquiryId, rows }: { inquiryId: string; ro
   const [counterModal, setCounterModal] = useState<{ threadId: string; supplierName: string; draft: string; replyTo: string | null } | null>(null);
   const [counterPrompt, setCounterPrompt] = useState<{ threadId: string; supplierName: string } | null>(null);
   const [counterTarget, setCounterTarget] = useState("");
+  // Operator-entered freight rate per unit (USD); same unit as supplier offers
+  // (assume MT for procurement; this is a back-of-envelope landed cost).
+  const [freightPerUnit, setFreightPerUnit] = useState<string>("");
 
   function refresh() {
     start(async () => {
@@ -93,11 +96,17 @@ export function SourcingOffersTable({ inquiryId, rows }: { inquiryId: string; ro
     });
   }
 
-  // Cheapest first if priced
+  const freight = parseFloat(freightPerUnit) || 0;
+  const landed = (o: Offer | null) => {
+    if (!o?.pricePerUnit) return null;
+    return o.pricePerUnit + (freight || 0);
+  };
+
+  // Sort by landed (price + freight) when freight set, else by price.
   const sorted = [...rows].sort((a, b) => {
-    const ap = a.offer?.pricePerUnit ?? Infinity;
-    const bp = b.offer?.pricePerUnit ?? Infinity;
-    return ap - bp;
+    const akey = (freight ? landed(a.offer) : a.offer?.pricePerUnit) ?? Infinity;
+    const bkey = (freight ? landed(b.offer) : b.offer?.pricePerUnit) ?? Infinity;
+    return akey - bkey;
   });
 
   if (rows.length === 0) {
@@ -128,16 +137,32 @@ export function SourcingOffersTable({ inquiryId, rows }: { inquiryId: string; ro
               {rows.length} supplier thread{rows.length === 1 ? "" : "s"} · cheapest first when priced
             </p>
           </div>
-          <button
-            type="button"
-            onClick={refresh}
-            disabled={busy}
-            className="btn btn-secondary btn-sm"
-            style={{ fontSize: 12, display: "inline-flex", alignItems: "center", gap: 6 }}
-          >
-            <Icon name="sparkles" size={11} />
-            {busy ? "Extracting…" : "Re-extract with AI"}
-          </button>
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+            <label style={{ fontSize: 11, color: "var(--text-3)", display: "inline-flex", alignItems: "center", gap: 4 }} title="Freight per unit added to each offer for landed-cost ranking">
+              + freight
+              <input
+                type="number"
+                value={freightPerUnit}
+                onChange={(e) => setFreightPerUnit(e.target.value)}
+                placeholder="0/unit"
+                style={{
+                  width: 78, padding: "4px 6px",
+                  border: "1px solid var(--border)", borderRadius: 3,
+                  fontSize: 11.5, background: "var(--surface)",
+                }}
+              />
+            </label>
+            <button
+              type="button"
+              onClick={refresh}
+              disabled={busy}
+              className="btn btn-secondary btn-sm"
+              style={{ fontSize: 12, display: "inline-flex", alignItems: "center", gap: 6 }}
+            >
+              <Icon name="sparkles" size={11} />
+              {busy ? "Extracting…" : "Re-extract with AI"}
+            </button>
+          </div>
         </div>
 
         <div style={{ overflowX: "auto" }}>
@@ -146,6 +171,7 @@ export function SourcingOffersTable({ inquiryId, rows }: { inquiryId: string; ro
               <tr style={{ background: "var(--surface-2)", color: "var(--text-3)", textAlign: "left" }}>
                 <Th>Supplier</Th>
                 <Th>Price</Th>
+                {freight > 0 && <Th>Landed</Th>}
                 <Th>Qty</Th>
                 <Th>Origin</Th>
                 <Th>Incoterms</Th>
@@ -182,6 +208,15 @@ export function SourcingOffersTable({ inquiryId, rows }: { inquiryId: string; ro
                       <div style={{ fontSize: 10.5, color: "var(--text-3)" }}>{r.threadSubject}</div>
                     </Td>
                     <Td><span style={{ fontWeight: 600 }}>{fmtPrice(o)}</span></Td>
+                    {freight > 0 && (
+                      <Td>
+                        {landed(o) != null ? (
+                          <span style={{ fontWeight: 700, color: "var(--brand)" }}>
+                            {o?.currency ?? ""} {Math.round(landed(o)!).toLocaleString()}{o?.unit ? `/${o.unit}` : ""}
+                          </span>
+                        ) : "—"}
+                      </Td>
+                    )}
                     <Td>{o?.qtyAvailable ?? "—"}</Td>
                     <Td>{o?.origin ?? "—"}</Td>
                     <Td>{o?.incoterms ?? "—"}</Td>

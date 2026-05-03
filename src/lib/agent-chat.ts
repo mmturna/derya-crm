@@ -40,6 +40,7 @@ Your job:
     9. Move a job to a new stage: "mark this booked", "this is in transit now", "move to customs", "we received it".
     10. Log a milestone: "log that BL was issued today", "ETA confirmed for May 22", "cargo ready next Tuesday". Type and date are extracted from the message.
     11. Show stuck/stale jobs: "what's stuck", "stale jobs", "what needs attention". Returns up to 8 jobs that haven't moved in 5+ days, each with an AI-suggested next action.
+    12. Morning briefing / daily digest: "morning briefing", "what's on my plate", "state of the pipeline" — aggregated snapshot of pending replies, stuck jobs, unawarded sourcing, proposed-stage jobs.
   Never tell the user you "can't create / can't merge / it's a workflow they need to do manually" — these actions exist. If the request is ambiguous, run the action you think is closest and report what changed.`;
 
 const RFQ_KEYWORDS = /\b(FCL|LCL|RFQ|quote|shipment|container|ETD|ETA|freight|cargo|BL|TEU|shipping|Incoterms|EXW|FOB|DAP|DDP|forwarder|carrier|ocean|airfreight|trucking)\b/i;
@@ -252,6 +253,39 @@ export async function chatWithAgent(history: ChatMsg[], userMessage: string, sco
       reply: `Captured RFQ "${subject}" in the inbox. AI parsing didn't return clean JSON — open the RFQ to fill fields manually.`,
       ingestedInquiryId: inquiry.id,
     };
+  }
+
+  // Branch 1.20: "Morning briefing" / "what's on my plate" / "daily digest" —
+  // aggregate snapshot across awaiting-reply + stuck + unawarded sourcing.
+  if (/\b(morning brief(ing)?|daily digest|whats? on my plate|state of (the )?pipeline|where (are|do) we stand)\b/i.test(userMessage)) {
+    const [needsReply, stuck, unawardedSourcing, openProposed] = await Promise.all([
+      prisma.emailThread.findMany({
+        where: { officeId: session.officeId, hiddenAt: null, OR: [{ snoozedUntil: null }, { snoozedUntil: { lte: new Date() } }] },
+        include: { messages: { orderBy: { sentAt: "desc" }, take: 1 }, job: { select: { reference: true } }, inquiry: { select: { subject: true } } },
+        orderBy: { lastMessageAt: "desc" }, take: 50,
+      }),
+      findStuckJobs(session.officeId, { daysThreshold: 5, max: 5 }),
+      prisma.inquiry.findMany({
+        where: { officeId: session.officeId, type: "SOURCING", status: { in: ["PARSED", "PRICED", "QUOTED"] } },
+        include: { _count: { select: { emailThreads: true } } },
+        take: 20,
+      }),
+      prisma.job.count({ where: { officeId: session.officeId, status: "PROPOSED" } }),
+    ]);
+    const awaiting = needsReply.filter((t) => t.messages[0]?.direction === "INBOUND");
+    const lines: string[] = [];
+    lines.push(`Pipeline pulse — ${new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long" })}`);
+    lines.push("");
+    if (openProposed > 0) lines.push(`· ${openProposed} proposed job${openProposed === 1 ? "" : "s"} awaiting your confirmation.`);
+    if (awaiting.length > 0) lines.push(`· ${awaiting.length} thread${awaiting.length === 1 ? "" : "s"} need a reply from you.`);
+    if (unawardedSourcing.length > 0) lines.push(`· ${unawardedSourcing.length} sourcing inquir${unawardedSourcing.length === 1 ? "y" : "ies"} still open — ${unawardedSourcing.filter((i) => i._count.emailThreads >= 2).length} have multiple supplier offers ready to compare.`);
+    if (stuck.length > 0) {
+      lines.push("");
+      lines.push(`${stuck.length} stuck job${stuck.length === 1 ? "" : "s"} (>5 days idle):`);
+      for (const s of stuck) lines.push(`  · ${s.reference} (${s.daysStuck}d) — ${s.suggestion}`);
+    }
+    if (lines.length === 2) lines.push("Nothing pending — pipeline is calm.");
+    return { reply: lines.join("\n") };
   }
 
   // Branch 1.25: "What's stuck?" / "stale jobs" / "what needs attention" — radar.
