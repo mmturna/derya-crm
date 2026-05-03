@@ -4,6 +4,7 @@ import { ReclassifyButton } from "@/components/reclassify-button";
 import { CreateInquiryButton } from "@/components/create-inquiry-button";
 import { ThreadAccordion } from "@/components/thread-accordion";
 import { MergeDuplicatesButton } from "@/components/merge-duplicates-button";
+import { InboxQuickReply } from "@/components/inbox-quick-reply";
 
 const FILTERS = [
   { key: "",                label: "All threads" },
@@ -218,9 +219,12 @@ export default async function InboxPage({
                         </span>
                       )}
                     </div>
-                    {!linked && (
-                      <CreateInquiryButton threadId={t.id} />
-                    )}
+                    <div style={{ display: "inline-flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                      <InboxQuickReply threadId={t.id} threadSubject={t.subject} />
+                      {!linked && (
+                        <CreateInquiryButton threadId={t.id} />
+                      )}
+                    </div>
                   </div>
 
                   {/* Last message preview + AI reason */}
