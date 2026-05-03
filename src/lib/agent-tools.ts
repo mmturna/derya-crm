@@ -320,6 +320,20 @@ export const TOOLS = [
     input_schema: { type: "object", properties: {} },
   },
   {
+    name: "link_threads_to_job",
+    description: "Find email threads matching a query (commodity / sender / subject) and link them all to the focused job's inquiry. Use this when the operator says 'the emails about X belong to this job' or asks why supplier offers aren't showing up — search and link in one step.",
+    input_schema: {
+      type: "object",
+      properties: {
+        q: { type: "string", description: "Search query — commodity name, sender domain, supplier name, etc." },
+        job_id: { type: "string", description: "Defaults to focused job" },
+        only_unlinked: { type: "boolean", description: "Default true — skip threads already linked to a different deal" },
+        limit: { type: "number", description: "Max threads to link, default 50" },
+      },
+      required: ["q"],
+    },
+  },
+  {
     name: "delete_job",
     description: "Permanently delete a job. ONLY call this when the user explicitly says delete/remove/kill. Destructive.",
     input_schema: {
@@ -741,6 +755,56 @@ export async function dispatchTool(
         });
         revalidatePath("/dashboard/inbox");
         return { ok: true, result: { hidden: cands.length } };
+      }
+      case "link_threads_to_job": {
+        if (!jobId) return { ok: false, error: "No job in scope" };
+        const job = await prisma.job.findFirst({
+          where: { id: jobId, officeId: ctx.officeId },
+          select: { id: true, type: true, inquiryId: true, reference: true, commodity: true },
+        });
+        if (!job?.inquiryId) return { ok: false, error: "Focused job has no linked inquiry" };
+        const q = String(input.q ?? "");
+        const onlyUnlinked = input.only_unlinked !== false;
+        const limit = Math.min(100, Number(input.limit ?? 50));
+        const where: any = {
+          officeId: ctx.officeId,
+          OR: [
+            { subject: { contains: q, mode: "insensitive" } },
+            { messages: { some: { OR: [
+              { bodyText: { contains: q, mode: "insensitive" } },
+              { fromEmail: { contains: q, mode: "insensitive" } },
+              { fromName: { contains: q, mode: "insensitive" } },
+            ] } } },
+          ],
+        };
+        if (onlyUnlinked) {
+          where.jobId = null;
+          where.OR = [
+            ...where.OR.map((cond: any) => ({ ...cond, inquiryId: null })),
+          ];
+        }
+        const threads = await prisma.emailThread.findMany({ where, take: limit, select: { id: true, subject: true } });
+        if (threads.length === 0) return { ok: true, result: { linked: 0, message: `No matching threads found for "${q}"` } };
+        await prisma.emailThread.updateMany({
+          where: { id: { in: threads.map((t) => t.id) } },
+          data: { inquiryId: job.inquiryId, autoLinkedAt: new Date() },
+        });
+        // Auto-extract supplier offers if SOURCING.
+        if (job.type === "SOURCING") {
+          try { await extractSourcingOffersForInquiry(job.inquiryId); } catch {}
+        }
+        revalidatePath("/dashboard/inbox");
+        revalidatePath(`/dashboard/jobs/${jobId}`);
+        revalidatePath(`/dashboard/rfq/${job.inquiryId}`);
+        return {
+          ok: true,
+          result: {
+            linked: threads.length,
+            job_reference: job.reference,
+            sample_subjects: threads.slice(0, 5).map((t) => t.subject),
+            note: job.type === "SOURCING" ? "Supplier offers re-extracted." : undefined,
+          },
+        };
       }
       case "delete_job": {
         if (!jobId) return { ok: false, error: "No job_id" };
