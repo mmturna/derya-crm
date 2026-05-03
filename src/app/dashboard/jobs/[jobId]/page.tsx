@@ -228,6 +228,14 @@ export default async function JobDetailPage({
           </div>
 
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+            <a
+              href={`/dashboard/inbox?job=${jobId}`}
+              className="btn btn-secondary btn-sm"
+              style={{ fontSize: 12, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 6 }}
+              title="Show every email thread attached to this load"
+            >
+              <Icon name="inbox" size={11} /> Inbox
+            </a>
             <PortalLinkButton jobId={jobId} hasToken={!!job.portalToken} notifyCustomer={job.notifyCustomer} />
             <PopulateJobButton jobId={jobId} />
             <form action={async (fd: FormData) => {

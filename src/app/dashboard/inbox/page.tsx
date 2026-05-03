@@ -9,6 +9,7 @@ import { HideThreadButton } from "@/components/hide-thread-button";
 import { SnoozeThreadButton } from "@/components/snooze-thread-button";
 import { BulkCheckbox } from "@/components/bulk-checkbox";
 import { BulkActionBar } from "@/components/bulk-action-bar";
+import { LoadFilterPicker } from "@/components/load-filter-picker";
 
 const FILTERS = [
   { key: "",                  label: "Active"          },  // default — excludes hidden + snoozed
@@ -59,7 +60,7 @@ function dominantKind(messages: { direction: string; classification: string | nu
 export default async function InboxPage({
   searchParams,
 }: {
-  searchParams: Promise<{ filter?: string; account?: string; view?: string; q?: string }>;
+  searchParams: Promise<{ filter?: string; account?: string; view?: string; q?: string; job?: string; inquiry?: string }>;
 }) {
   const session = await requireSession();
   const sp = await searchParams;
@@ -67,6 +68,8 @@ export default async function InboxPage({
   const accountFilter = sp.account ?? "";
   const view = sp.view === "loads" ? "loads" : "threads";
   const searchQuery = (sp.q ?? "").trim();
+  const jobFilter = sp.job?.trim() || "";
+  const inquiryFilter = sp.inquiry?.trim() || "";
 
   const accounts = await prisma.emailAccount.findMany({
     where: { officeId: session.officeId, isActive: true },
@@ -98,6 +101,59 @@ export default async function InboxPage({
   if (accountFilter) {
     where.messages = { some: { accountId: accountFilter } };
   }
+  // Load-based filter: scope to a specific job (and its linked inquiry threads)
+  // or a specific inquiry directly. Overrides the linked/unlinked filter
+  // because if you're filtering to a load, you implicitly want all of its threads.
+  let focusedLoad: { kind: "job" | "inquiry"; id: string; label: string; sublabel: string; threadIds: string[] } | null = null;
+  if (jobFilter) {
+    const job = await prisma.job.findFirst({
+      where: { id: jobFilter, officeId: session.officeId },
+      select: {
+        id: true, reference: true, type: true, status: true,
+        company: { select: { name: true } },
+        inquiryId: true,
+        emailThreads: { select: { id: true } },
+        inquiry: { select: { emailThreads: { select: { id: true } } } },
+      },
+    });
+    if (job) {
+      const ids = new Set<string>([
+        ...job.emailThreads.map((t) => t.id),
+        ...(job.inquiry?.emailThreads.map((t) => t.id) ?? []),
+      ]);
+      focusedLoad = {
+        kind: "job", id: job.id,
+        label: `${job.reference} · ${job.company?.name ?? "no customer"}`,
+        sublabel: `${job.type === "SOURCING" ? "Procurement" : "Forwarding"} · ${job.status}`,
+        threadIds: [...ids],
+      };
+    }
+  } else if (inquiryFilter) {
+    const inq = await prisma.inquiry.findFirst({
+      where: { id: inquiryFilter, officeId: session.officeId },
+      select: {
+        id: true, subject: true, type: true, status: true,
+        emailThreads: { select: { id: true } },
+      },
+    });
+    if (inq) {
+      focusedLoad = {
+        kind: "inquiry", id: inq.id,
+        label: inq.subject,
+        sublabel: `${inq.type === "SOURCING" ? "Procurement RFQ" : "Forwarding RFQ"} · ${inq.status}`,
+        threadIds: inq.emailThreads.map((t) => t.id),
+      };
+    }
+  }
+  if (focusedLoad) {
+    where.AND = where.AND ?? [];
+    where.AND.push({ id: { in: focusedLoad.threadIds.length ? focusedLoad.threadIds : ["__none__"] } });
+    // When focused on a load, show hidden + snoozed threads too — operator wants
+    // the complete picture for this deal regardless of triage state.
+    delete where.hiddenAt;
+    where.AND = where.AND.filter((c: any) => !c.OR || !c.OR.some((o: any) => "snoozedUntil" in o));
+  }
+
   if (searchQuery) {
     where.AND = where.AND ?? [];
     where.AND.push({ OR: [
@@ -235,6 +291,22 @@ export default async function InboxPage({
             a load using all the messages as context.
           </p>
         </div>
+        <LoadFilterPicker
+          activeJobId={jobFilter || null}
+          activeInquiryId={inquiryFilter || null}
+          openJobs={await prisma.job.findMany({
+            where: { officeId: session.officeId, status: { notIn: ["DELIVERED", "CANCELLED"] } },
+            select: { id: true, reference: true, type: true, company: { select: { name: true } } },
+            orderBy: { updatedAt: "desc" },
+            take: 100,
+          }).then((jobs) => jobs.map((j) => ({ id: j.id, reference: j.reference, type: j.type, customer: j.company?.name ?? null })))}
+          unlinkedInquiries={await prisma.inquiry.findMany({
+            where: { officeId: session.officeId, status: { in: ["INGESTED", "PARSED", "PRICED", "QUOTED"] }, job: null },
+            select: { id: true, subject: true, type: true },
+            orderBy: { receivedAt: "desc" },
+            take: 60,
+          })}
+        />
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <MergeDuplicatesButton />
           <ReclassifyButton onlyUnclassified={false} />
@@ -327,6 +399,38 @@ export default async function InboxPage({
           })}
         </div>
       </div>
+
+      {focusedLoad && (
+        <div style={{
+          padding: "10px 14px", marginBottom: 12, borderRadius: 6,
+          background: "var(--brand-light)", border: "1px solid var(--brand-border)",
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+        }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--brand)" }}>
+              Filtered to load
+            </div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {focusedLoad.label}
+              <span style={{ marginLeft: 8, fontSize: 11, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                {focusedLoad.sublabel}
+              </span>
+            </div>
+            <div style={{ fontSize: 11, color: "var(--text-3)", marginTop: 2 }}>
+              {focusedLoad.threadIds.length} thread{focusedLoad.threadIds.length === 1 ? "" : "s"} attached · including hidden + snoozed
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            <a href={focusedLoad.kind === "job" ? `/dashboard/jobs/${focusedLoad.id}` : `/dashboard/rfq/${focusedLoad.id}`}
+               className="btn btn-secondary btn-sm" style={{ fontSize: 12, textDecoration: "none" }}>
+              Open {focusedLoad.kind === "job" ? "job" : "RFQ"}
+            </a>
+            <a href="/dashboard/inbox" className="btn btn-secondary btn-sm" style={{ fontSize: 12, textDecoration: "none" }}>
+              Clear filter
+            </a>
+          </div>
+        </div>
+      )}
 
       <BulkActionBar inquiries={openInquiriesForBulk} />
 
@@ -459,15 +563,33 @@ export default async function InboxPage({
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 8 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                       {t.job ? (
-                        <a href={`/dashboard/jobs/${t.job.id}`} style={{ fontSize: 12, fontWeight: 600, color: "var(--brand)", textDecoration: "none" }}>
-                          → {t.job.reference} {t.job.company?.name ? `· ${t.job.company.name}` : ""}
-                          <TypeBadge type={t.job.type} />
-                        </a>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                          <a href={`/dashboard/jobs/${t.job.id}`} style={{ fontSize: 12, fontWeight: 600, color: "var(--brand)", textDecoration: "none" }}>
+                            → {t.job.reference} {t.job.company?.name ? `· ${t.job.company.name}` : ""}
+                            <TypeBadge type={t.job.type} />
+                          </a>
+                          <a
+                            href={`/dashboard/inbox?job=${t.job.id}`}
+                            title="Show only this load's emails"
+                            style={{ fontSize: 11, color: "var(--text-3)", textDecoration: "none", padding: "2px 5px", border: "1px solid var(--border)", borderRadius: 3 }}
+                          >
+                            See all
+                          </a>
+                        </span>
                       ) : t.inquiry ? (
-                        <a href={`/dashboard/rfq/${t.inquiry.id}`} style={{ fontSize: 12, fontWeight: 600, color: "var(--brand)", textDecoration: "none" }}>
-                          → {t.inquiry.subject}
-                          <TypeBadge type={t.inquiry.type} />
-                        </a>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                          <a href={`/dashboard/rfq/${t.inquiry.id}`} style={{ fontSize: 12, fontWeight: 600, color: "var(--brand)", textDecoration: "none" }}>
+                            → {t.inquiry.subject}
+                            <TypeBadge type={t.inquiry.type} />
+                          </a>
+                          <a
+                            href={`/dashboard/inbox?inquiry=${t.inquiry.id}`}
+                            title="Show only this inquiry's emails"
+                            style={{ fontSize: 11, color: "var(--text-3)", textDecoration: "none", padding: "2px 5px", border: "1px solid var(--border)", borderRadius: 3 }}
+                          >
+                            See all
+                          </a>
+                        </span>
                       ) : (
                         <span style={{ fontSize: 12, color: "var(--text-3)", fontStyle: "italic" }}>
                           Not linked to any load
