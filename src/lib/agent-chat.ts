@@ -27,6 +27,7 @@ Your job:
 - If the user pastes what looks like an inbound freight RFQ email (multi-paragraph, has shipping context like origin/destination/mode/weight or words like "shipment", "container", "FCL", "LCL", "ETD", "ETA", "freight"), you should NOT analyze it inline — instead reply with a single sentence confirming you'll ingest it (the system will create an Inquiry separately).
 - For all other questions, ground your answer in the OPS CONTEXT provided.
 - Never fabricate a job or RFQ that's not in the context.
+- **CRITICAL — DO NOT INVENT ACTIONS YOU TOOK.** If the system intercepted an action verb, you would not be in this branch — the system replies directly with the real result. By the time you're answering, that means the system did NOT run anything. So you must NEVER write phrases like "I merged...", "Running the merge now", "Job X has been consolidated", "Done", "Result: ...". You have no execute capability in this turn. If you think the user wanted an action, suggest a clearer phrasing: e.g. "If you'd like me to merge those, say 'merge all into one procurement' and I'll run it." Otherwise just answer the question.
 - When the user is focused on a job and asks you to populate, fill, extract, or create load details / specs / fields from the linked emails — **do not ask follow-up questions about weight, port, etc.** The system intercepts that intent and runs an extraction over every linked email automatically. You will only see the resulting fields, not the original ask. If a user asks something where extraction would help and you don't have enough context to answer, suggest they ask "extract load details from the emails".
 - You CAN take real actions in the platform. Specifically you can:
     1. Consolidate / categorize / merge / group multiple RFQs into ONE procurement (or forwarding) job — when the user says things like "merge all into one", "consolidate the soybean and corn gluten under one procurement", "categorize everything under one job", "group these RFQs", you can do it. The system intercepts that intent and runs the merge automatically.
@@ -84,20 +85,26 @@ function detectMergeIntent(text: string): { kind: "all-into-one" | "dedup" | "no
   if (/\b(procurement|sourcing|buying|purchase|supplier)\b/.test(t)) type = "SOURCING";
   else if (/\b(forwarding|shipping|freight|logistics)\b/.test(t)) type = "FORWARDING";
 
-  // "merge all / consolidate all / group all / categorize all / X under one / into one job"
-  const allIntoOne =
-    /\b(merge|consolidate|group|categorize|combine|unify|bundle|put|gather)\s+(all|every|the|these|those)\b/.test(t) ||
-    /\b(under|into|to)\s+(one|a single|a)\s+(procurement|forwarding|sourcing|job|deal|rfq)\b/.test(t) ||
-    /\bone\s+(big|single|consolidated)\s+(procurement|forwarding|sourcing|job)\b/.test(t) ||
-    /\bcategorize\b.*\b(all|together|under)\b/.test(t);
+  // Verbs that mean "smush them together"
+  const verbHit = /\b(merge|consolidate|group|categorize|combine|unify|bundle|gather|collapse|fold|join)\b/.test(t);
 
-  // "merge duplicates / dedup"
+  // Explicit "merge duplicates" first — more specific than all-into-one.
   const dedup =
     /\b(merge|consolidate|dedup|deduplicate|remove)\s+(duplicate|dupe|repeat)/.test(t) ||
-    /\bfind\s+duplicates\b/.test(t);
+    /\bfind\s+duplicates\b/.test(t) ||
+    /\b(duplicate|duplicated)\s+(inquir|rfq|job|deal)/.test(t);
+  if (dedup) return { kind: "dedup", type };
+
+  // "all into one" patterns:
+  const allIntoOne =
+    verbHit && /\b(all|every|the|these|those|them)\b/.test(t)
+    || /\b(under|into|to)\s+(one|a single|a)\s+(procurement|forwarding|sourcing|job|deal|rfq)\b/.test(t)
+    || /\bone\s+(big|single|consolidated)\s+(procurement|forwarding|sourcing|job)\b/.test(t)
+    || /\b(they|these|those)\s+(are|all)?\s*(all\s*)?(the\s*)?same\b/.test(t)            // "they are all the same"
+    || /\b(same\s*(deal|thing|inquiry|job|rfq))\b/.test(t)                                // "same deal"
+    || (verbHit && /\b(all|together|into one|under one)\b/.test(t));
 
   if (allIntoOne) return { kind: "all-into-one", type };
-  if (dedup) return { kind: "dedup", type };
   return { kind: "none" };
 }
 
