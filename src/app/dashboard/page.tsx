@@ -43,7 +43,19 @@ function fmtInput(d: Date | null | undefined) {
   return d ? new Date(d).toISOString().split("T")[0] : "";
 }
 
-export default async function DashboardPage() {
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams?: Promise<{ stage?: string }>;
+}) {
+  const sp = searchParams ? await searchParams : {};
+  const stageOverride = sp.stage && ["INQUIRY", "QUOTED", "BOOKED", "IN_TRANSIT", "CUSTOMS", "DELIVERED"].includes(sp.stage)
+    ? sp.stage
+    : null;
+  return _DashboardPageImpl(stageOverride);
+}
+
+async function _DashboardPageImpl(stageOverride: string | null) {
   const session = await requireSession();
   const focusedId = await getFocusedJobId();
 
@@ -377,6 +389,7 @@ export default async function DashboardPage() {
         quoteLines={quoteLines}
         laneRates={laneRates}
         emailThreads={threadsView}
+        stageOverride={stageOverride}
       />
 
       {/* Stage-specific email panel */}
@@ -537,7 +550,7 @@ type AnyJob = Awaited<ReturnType<typeof prisma.job.findFirst>>;
 type AnyCarrierQuote = NonNullable<NonNullable<AnyJob>>;
 
 function StageWorkbench({
-  job, carrierQuotes, receivedQuotes, docs, quoteLines, laneRates, emailThreads,
+  job, carrierQuotes, receivedQuotes, docs, quoteLines, laneRates, emailThreads, stageOverride,
 }: {
   job: NonNullable<Awaited<ReturnType<typeof prisma.job.findFirst<{
     include: {
@@ -554,8 +567,14 @@ function StageWorkbench({
   quoteLines: { desc: string; amount: number; cur: string }[];
   laneRates: { id: string; origin: string; destination: string; mode: string; baseAmount: number; currency: string; validFrom: Date; validTo: Date | null; notes: string | null }[];
   emailThreads: ThreadView[];
+  stageOverride: string | null;
 }) {
-  const status = job.status;
+  // Use the URL-overridden stage if set; otherwise the job's actual status.
+  // This lets the operator preview any stage's workbench (carrier rates,
+  // documents, etc) without changing the job's lifecycle.
+  const actualStatus = job.status;
+  const status = stageOverride ?? job.status;
+  const isPreview = !!stageOverride && stageOverride !== actualStatus;
 
   // Header strip + stage-specific content
   const STAGE_TITLES: Record<string, { title: string; sub: string }> = {
@@ -568,15 +587,48 @@ function StageWorkbench({
   };
   const stage = STAGE_TITLES[status] ?? { title: "Workbench", sub: "" };
 
+  const STAGE_KEYS = ["INQUIRY", "QUOTED", "BOOKED", "IN_TRANSIT", "CUSTOMS", "DELIVERED"] as const;
   return (
     <div style={{ marginTop: 14 }}>
-      <div className="workbench-header">
-        <div>
+      <div className="workbench-header" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--text-3)", marginBottom: 4 }}>
             Stage workbench · {STATUS_LABEL[status]}
+            {isPreview && (
+              <span style={{ marginLeft: 8, padding: "1px 6px", borderRadius: 3, background: "var(--brand-light)", color: "var(--brand)", fontSize: 9.5, fontWeight: 700, letterSpacing: "0.06em" }}>
+                PREVIEW · job is {STATUS_LABEL[actualStatus]}
+              </span>
+            )}
           </div>
           <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{stage.title}</div>
           <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 2 }}>{stage.sub}</div>
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, padding: 3, borderRadius: 4, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
+          {STAGE_KEYS.map((s) => {
+            const isActive = s === status;
+            const isReal = s === actualStatus;
+            const href = s === actualStatus ? "/dashboard" : `/dashboard?stage=${s}`;
+            return (
+              <a
+                key={s}
+                href={href}
+                title={isReal ? "Job is at this stage" : `Preview ${STATUS_LABEL[s]} workbench (doesn't change status)`}
+                style={{
+                  fontSize: 10.5, fontWeight: 600, padding: "5px 9px", borderRadius: 3,
+                  background: isActive ? "var(--surface)" : "transparent",
+                  color: isActive ? "var(--text)" : "var(--text-3)",
+                  border: isActive ? "1px solid var(--border)" : "1px solid transparent",
+                  textDecoration: "none", letterSpacing: "0.04em", textTransform: "uppercase",
+                  display: "inline-flex", alignItems: "center", gap: 4,
+                }}
+              >
+                {isReal && (
+                  <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--brand)", display: "inline-block" }} aria-hidden />
+                )}
+                {STATUS_LABEL[s]}
+              </a>
+            );
+          })}
         </div>
       </div>
 
@@ -591,7 +643,7 @@ function StageWorkbench({
         <DocumentsStage job={job} docs={docs} />
       )}
       {status === "IN_TRANSIT" && (
-        <InTransitStage job={job} docs={docs} />
+        <InTransitStage job={job} docs={docs} carrierQuotes={carrierQuotes} />
       )}
       {status === "DELIVERED" && (
         <DeliveredStage job={job} quoteLines={quoteLines} />
@@ -857,20 +909,55 @@ function DocumentsStage({ job, docs }: { job: any; docs: any[] }) {
   );
 }
 
-function InTransitStage({ job, docs }: { job: any; docs: any[] }) {
+function InTransitStage({ job, docs, carrierQuotes }: { job: any; docs: any[]; carrierQuotes: any[] }) {
+  const selected = carrierQuotes.find((q: any) => q.status === "RECEIVED" && (q.total40HC === job.cost || q.total40 === job.cost || q.total20 === job.cost)) ?? carrierQuotes.find((q: any) => q.status === "RECEIVED");
+  const received = carrierQuotes.filter((q: any) => q.status === "RECEIVED");
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-      <div className="card">
-        <div className="worktable-section-header">Transit details</div>
-        <div style={{ padding: 16, display: "grid", gridTemplateColumns: "auto 1fr", rowGap: 8, columnGap: 16, fontSize: 12.5 }}>
-          <span style={{ color: "var(--text-3)" }}>ETD</span>
-          <span style={{ fontWeight: 600 }}>{job.etd ? new Date(job.etd).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "—"}</span>
-          <span style={{ color: "var(--text-3)" }}>ETA</span>
-          <span style={{ fontWeight: 600 }}>{job.eta ? new Date(job.eta).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "—"}</span>
-          <span style={{ color: "var(--text-3)" }}>Vessel/Carrier</span>
-          <span style={{ fontWeight: 600 }}>—</span>
-          <span style={{ color: "var(--text-3)" }}>Container</span>
-          <span style={{ fontWeight: 600 }}>—</span>
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div className="card">
+          <div className="worktable-section-header">Transit details</div>
+          <div style={{ padding: 16, display: "grid", gridTemplateColumns: "auto 1fr", rowGap: 8, columnGap: 16, fontSize: 12.5 }}>
+            <span style={{ color: "var(--text-3)" }}>ETD</span>
+            <span style={{ fontWeight: 600 }}>{job.etd ? new Date(job.etd).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "—"}</span>
+            <span style={{ color: "var(--text-3)" }}>ETA</span>
+            <span style={{ fontWeight: 600 }}>{job.eta ? new Date(job.eta).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "—"}</span>
+            <span style={{ color: "var(--text-3)" }}>Carrier</span>
+            <span style={{ fontWeight: 600 }}>{selected?.carrier ?? "—"}</span>
+            <span style={{ color: "var(--text-3)" }}>Service</span>
+            <span style={{ fontWeight: 600 }}>{selected?.service ?? "—"}</span>
+            <span style={{ color: "var(--text-3)" }}>Transit</span>
+            <span style={{ fontWeight: 600 }}>{selected?.transitDays ? `${selected.transitDays} days` : "—"}</span>
+          </div>
+        </div>
+        <div className="card">
+          <div className="worktable-section-header">Carrier rates received <span style={{ marginLeft: 8, fontSize: 11, color: "var(--text-3)", fontWeight: 500 }}>· {received.length} of {carrierQuotes.length}</span></div>
+          <div style={{ padding: "10px 16px 14px" }}>
+            {received.length === 0 ? (
+              <div style={{ fontSize: 12.5, color: "var(--text-3)" }}>No carrier replies on this load yet.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {received.map((q: any) => {
+                  const total = q.total40HC ?? q.total40 ?? q.total20;
+                  const isSelected = total === job.cost;
+                  return (
+                    <div key={q.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid var(--border)" }}>
+                      <div>
+                        <div style={{ fontSize: 12.5, fontWeight: 600 }}>{q.carrier}</div>
+                        <div style={{ fontSize: 10.5, color: "var(--text-3)" }}>{q.service ?? "—"}{q.transitDays ? ` · ${q.transitDays}d` : ""}</div>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 13, fontWeight: 700 }}>{total ? `$${total.toLocaleString()}` : "—"}</span>
+                        {isSelected && (
+                          <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3, background: "var(--brand)", color: "#fff", letterSpacing: "0.06em" }}>SELECTED</span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       </div>
       <DocumentsStage job={job} docs={docs} />
