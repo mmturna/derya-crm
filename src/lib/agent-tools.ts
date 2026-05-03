@@ -266,6 +266,18 @@ export const TOOLS = [
     },
   },
   {
+    name: "rename_job",
+    description: "Rename / re-title a job. The job's reference (e.g. JOB-2026-003) is the immutable ID — you cannot change it — but you CAN change the displayed deal name by updating the linked Inquiry's subject. Most UI surfaces show that subject as the job's title, so this is the right tool when the operator says 'rename this job to X', 'call this deal X', 'title it X', 'change the job name to X'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        job_id: { type: "string", description: "Defaults to focused job" },
+        new_title: { type: "string", description: "New deal name / subject" },
+      },
+      required: ["new_title"],
+    },
+  },
+  {
     name: "rename_company",
     description: "Rename the customer/company already linked to a job. Affects every job linked to this customer. Refuses if a different company already has the new name.",
     input_schema: {
@@ -718,6 +730,26 @@ export async function dispatchTool(
           createIfMissing: input.create_if_missing !== false,
         });
         return "error" in r ? { ok: false, error: r.error } : { ok: true, result: r };
+      }
+      case "rename_job": {
+        if (!jobId) return { ok: false, error: "No job in scope" };
+        const newTitle = String(input.new_title ?? "").trim();
+        if (!newTitle) return { ok: false, error: "new_title required" };
+        const job = await prisma.job.findFirst({
+          where: { id: jobId, officeId: ctx.officeId },
+          select: { id: true, reference: true, inquiryId: true, inquiry: { select: { subject: true } } },
+        });
+        if (!job) return { ok: false, error: "Job not found" };
+        if (!job.inquiryId) return { ok: false, error: "Job has no linked inquiry — title is stored on the inquiry's subject. Set a customer/inquiry first." };
+        const oldTitle = job.inquiry?.subject ?? "(untitled)";
+        await prisma.inquiry.update({
+          where: { id: job.inquiryId },
+          data: { subject: newTitle.slice(0, 200) },
+        });
+        revalidatePath(`/dashboard/jobs/${jobId}`);
+        revalidatePath(`/dashboard/rfq/${job.inquiryId}`);
+        revalidatePath("/dashboard/jobs");
+        return { ok: true, result: { reference: job.reference, from: oldTitle, to: newTitle } };
       }
       case "rename_company": {
         if (!jobId) return { ok: false, error: "No job_id" };
