@@ -11,6 +11,8 @@ import { StageEmailPanel, type ThreadView } from "@/components/stage-email-panel
 import { templatesForStatus } from "@/lib/job-email-types";
 import { CopyPortalLink } from "@/components/copy-portal-link";
 import { CounterOfferButton } from "@/components/counter-offer-button";
+import { DocumentViewer } from "@/components/document-viewer";
+import React from "react";
 import {
   initJobDocuments, initJobMilestones, updateDocStatus,
   markMilestoneActual, updateMilestonePlanned,
@@ -868,42 +870,87 @@ function DocumentsStage({ job, docs }: { job: any; docs: any[] }) {
         Documents · {approved}/{docs.length} approved
       </div>
       <div>
-        {docs.map((d) => (
-          <div key={d.id} style={{
-            display: "flex", alignItems: "center", justifyContent: "space-between",
-            padding: "12px 16px", borderBottom: "1px solid var(--border)",
-          }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <div style={{
-                width: 28, height: 28, borderRadius: 4, flexShrink: 0,
-                background: d.status === "APPROVED" ? "var(--brand)" : "var(--surface-3)",
-                border: `1px solid ${d.status === "APPROVED" ? "var(--brand)" : "var(--border)"}`,
-                color: d.status === "APPROVED" ? "#fff" : "var(--text-3)",
-                display: "flex", alignItems: "center", justifyContent: "center",
-              }}>
-                {d.status === "APPROVED" ? <Icon name="check" size={14} strokeWidth={2.5} />
-                  : d.status === "UPLOADED" ? <Icon name="chevron-up" size={13} strokeWidth={2.5} />
-                  : <Icon name="circle" size={11} strokeWidth={1.5} />}
+        {docs.map((d) => {
+          let flags: string[] = [];
+          let keyFields: Record<string, unknown> = {};
+          if (d.aiFlags) { try { const x = JSON.parse(d.aiFlags); if (Array.isArray(x)) flags = x.filter((y: unknown) => typeof y === "string") as string[]; } catch {} }
+          if (d.aiKeyFields) { try { const x = JSON.parse(d.aiKeyFields); if (x && typeof x === "object") keyFields = x; } catch {} }
+          return (
+          <div key={d.id} style={{ padding: "12px 16px", borderBottom: "1px solid var(--border)" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0, flex: 1 }}>
+                <div style={{
+                  width: 28, height: 28, borderRadius: 4, flexShrink: 0,
+                  background: d.status === "APPROVED" ? "var(--brand)" : "var(--surface-3)",
+                  border: `1px solid ${d.status === "APPROVED" ? "var(--brand)" : "var(--border)"}`,
+                  color: d.status === "APPROVED" ? "#fff" : "var(--text-3)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                  {d.status === "APPROVED" ? <Icon name="check" size={14} strokeWidth={2.5} />
+                    : d.status === "UPLOADED" ? <Icon name="chevron-up" size={13} strokeWidth={2.5} />
+                    : <Icon name="circle" size={11} strokeWidth={1.5} />}
+                </div>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{d.name}</div>
+                  <div style={{ fontSize: 11.5, color: "var(--text-3)" }}>
+                    {DOC_TYPE_LABEL[d.docType] ?? d.docType} · {d.status.toLowerCase()}
+                    {d.aiAnalyzedAt && <span style={{ marginLeft: 6, color: "var(--brand)" }}>· AI commented</span>}
+                  </div>
+                </div>
               </div>
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>{d.name}</div>
-                <div style={{ fontSize: 11.5, color: "var(--text-3)" }}>{DOC_TYPE_LABEL[d.docType] ?? d.docType} · {d.status.toLowerCase()}</div>
+              <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                {d.url && d.status !== "PENDING" && (
+                  <DocumentViewer documentId={d.id} name={d.name} status={d.status} />
+                )}
+                {d.status === "PENDING" && (
+                  <form action={updateDocStatus.bind(null, d.id, "UPLOADED")}>
+                    <button type="submit" className="btn btn-secondary btn-sm" style={{ fontSize: 11.5 }}>Mark uploaded</button>
+                  </form>
+                )}
+                {d.status === "UPLOADED" && (
+                  <form action={updateDocStatus.bind(null, d.id, "APPROVED")}>
+                    <button type="submit" className="btn btn-sm" style={{ fontSize: 11.5 }}>Approve</button>
+                  </form>
+                )}
               </div>
             </div>
-            <div style={{ display: "flex", gap: 6 }}>
-              {d.status === "PENDING" && (
-                <form action={updateDocStatus.bind(null, d.id, "UPLOADED")}>
-                  <button type="submit" className="btn btn-secondary btn-sm" style={{ fontSize: 11.5 }}>Mark uploaded</button>
-                </form>
-              )}
-              {d.status === "UPLOADED" && (
-                <form action={updateDocStatus.bind(null, d.id, "APPROVED")}>
-                  <button type="submit" className="btn btn-sm" style={{ fontSize: 11.5 }}>Approve</button>
-                </form>
-              )}
-            </div>
+            {(d.aiSummary || flags.length > 0) && (
+              <div style={{ marginTop: 8, marginLeft: 40, padding: "8px 10px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 4 }}>
+                {d.aiSummary && (
+                  <div style={{ fontSize: 11.5, color: "var(--text-2)", lineHeight: 1.5 }}>
+                    <span style={{ fontWeight: 700, color: "var(--brand)", textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 9.5, marginRight: 6 }}>AI</span>
+                    {d.aiSummary}
+                  </div>
+                )}
+                {flags.length > 0 && (
+                  <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 3 }}>
+                    {flags.map((f: string, i: number) => (
+                      <div key={i} style={{ fontSize: 11, color: "var(--danger)", display: "flex", gap: 6 }}>
+                        <Icon name="alert" size={11} /><span>{f}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {Object.keys(keyFields).length > 0 && (
+                  <details style={{ marginTop: 6 }}>
+                    <summary style={{ fontSize: 10.5, color: "var(--text-3)", cursor: "pointer", letterSpacing: "0.04em", textTransform: "uppercase" }}>
+                      Extracted fields ({Object.keys(keyFields).length})
+                    </summary>
+                    <div style={{ marginTop: 4, display: "grid", gridTemplateColumns: "max-content 1fr", gap: "2px 10px", fontSize: 11 }}>
+                      {Object.entries(keyFields).map(([k, v]) => (
+                        <React.Fragment key={k}>
+                          <span style={{ color: "var(--text-3)" }}>{k}</span>
+                          <span style={{ color: "var(--text)" }}>{Array.isArray(v) ? v.join(", ") : String(v)}</span>
+                        </React.Fragment>
+                      ))}
+                    </div>
+                  </details>
+                )}
+              </div>
+            )}
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
