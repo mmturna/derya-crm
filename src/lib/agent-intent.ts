@@ -9,7 +9,7 @@ import Anthropic from "@anthropic-ai/sdk";
 // Returns "chat" when the message is a question/statement, not a command.
 
 export type AgentIntent =
-  | { intent: "merge-all-into-one"; type?: "SOURCING" | "FORWARDING" }
+  | { intent: "merge-all-into-one"; type?: "SOURCING" | "FORWARDING"; subject?: string; commodity?: string; origin?: string; destination?: string; weightKg?: number }
   | { intent: "dedup" }
   | { intent: "populate-load" }
   | { intent: "award-supplier"; supplierHint?: string }
@@ -38,7 +38,13 @@ Schema:
 { "intent": "<one of below>", ...optional intent-specific fields }
 
 Action verbs (intents):
-- "merge-all-into-one" — operator wants to consolidate multiple inquiries/jobs/RFQs into ONE umbrella job. Triggers: "merge them all", "consolidate", "they're all the same", "categorize under one", "group these", "bundle these procurement deals", "the X jobs are duplicates so combine". Optional field: "type": "SOURCING" if they say procurement/sourcing/buying, "FORWARDING" if they say forwarding/shipping.
+- "merge-all-into-one" — operator wants to consolidate multiple inquiries/jobs/RFQs into ONE umbrella job. Triggers: "merge them all", "consolidate", "they're all the same", "categorize under one", "group these", "bundle these procurement deals", "the X jobs are duplicates so combine". Optional fields:
+    "type": "SOURCING" if they say procurement/sourcing/buying, "FORWARDING" if they say forwarding/shipping.
+    "subject": short headline string if operator describes the consolidated deal (e.g. "Soybean meal — 300 MT to Ashgabat" → "Soybean meal procurement, 300 MT to Ashgabat").
+    "commodity": commodity name if mentioned (e.g. "soybean meal", "corn gluten", "wheat").
+    "destination": destination city/country if mentioned (e.g. "Ashgabat", "Hamburg, DE").
+    "origin": origin if mentioned.
+    "weightKg": weight in KILOGRAMS if mentioned. Convert MT/tons → kg by ×1000. "300 MT" → 300000.
 - "dedup" — find and remove DUPLICATE inquiries (same exact deal duplicated). "find duplicates", "dedupe".
 - "populate-load" — scoped only: extract job fields from linked emails. "create load details", "populate from emails", "fill in the job". Requires scopeJobId.
 - "award-supplier" — scoped to SOURCING job: pick a winning supplier. "award the cheapest", "go with X", "select best offer". Optional field: "supplierHint": short name fragment if mentioned.
@@ -86,7 +92,15 @@ Context:
 
   if (parsed.intent === "merge-all-into-one") {
     const t = parsed.type;
-    return { intent: "merge-all-into-one", type: t === "SOURCING" || t === "FORWARDING" ? t : undefined };
+    return {
+      intent: "merge-all-into-one",
+      type: t === "SOURCING" || t === "FORWARDING" ? t : undefined,
+      subject: typeof parsed.subject === "string" ? parsed.subject.slice(0, 200) : undefined,
+      commodity: typeof parsed.commodity === "string" ? parsed.commodity.slice(0, 200) : undefined,
+      origin: typeof parsed.origin === "string" ? parsed.origin.slice(0, 100) : undefined,
+      destination: typeof parsed.destination === "string" ? parsed.destination.slice(0, 100) : undefined,
+      weightKg: typeof parsed.weightKg === "number" ? parsed.weightKg : undefined,
+    };
   }
   if (parsed.intent === "award-supplier") {
     return { intent: "award-supplier", supplierHint: typeof parsed.supplierHint === "string" ? parsed.supplierHint : undefined };

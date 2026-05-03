@@ -79,6 +79,31 @@ function detectDraftReplyIntent(text: string): boolean {
   return true;
 }
 
+// Quick regex-only extraction of "300 MT to Ashgabat soybean meal"-style specs
+// from a merge command. Used to pre-fill the keeper inquiry without an AI hop.
+function extractMergeSpecs(text: string): { weightKg?: number; destination?: string; origin?: string; commodity?: string } {
+  const out: { weightKg?: number; destination?: string; origin?: string; commodity?: string } = {};
+  // Weight: "300 mt", "300mt", "300 metric tons", "300 tons", "300t"
+  const wm = text.match(/\b(\d{1,5}(?:[.,]\d+)?)\s*(?:metric\s+ton|metric\s+tons|tonnes|tonne|tons|ton|t|mt)\b/i);
+  if (wm) {
+    const num = parseFloat(wm[1].replace(",", ""));
+    if (!isNaN(num)) out.weightKg = Math.round(num * 1000);
+  } else {
+    const wkg = text.match(/\b(\d{2,7})\s*kg\b/i);
+    if (wkg) out.weightKg = parseInt(wkg[1], 10);
+  }
+  // "to Ashgabat" / "to Hamburg, DE"
+  const dm = text.match(/\bto\s+([A-Z][a-zA-Z .'-]{1,40}(?:,\s*[A-Za-z]{2,3})?)/);
+  if (dm) out.destination = dm[1].trim();
+  // "from Constanta" / "from Brazil"
+  const om = text.match(/\bfrom\s+([A-Z][a-zA-Z .'-]{1,40}(?:,\s*[A-Za-z]{2,3})?)/);
+  if (om) out.origin = om[1].trim();
+  // Commodity heuristic — common freight commodities. Operator can still override later.
+  const commodityMatch = text.match(/\b(soybean(?:\s+meal)?|corn(?:\s+gluten(?:\s+meal)?)?|wheat|rice|barley|maize|sunflower(?:\s+oil)?|cotton(?:seed)?(?:\s+cake)?|fish\s+meal|animal\s+feed|fertilizer|urea|ammonia|cement|steel|copper|aluminum)\b/i);
+  if (commodityMatch) out.commodity = commodityMatch[1].replace(/\s+/g, " ").trim();
+  return out;
+}
+
 function detectMergeIntent(text: string): { kind: "all-into-one" | "dedup" | "none"; type?: "SOURCING" | "FORWARDING" } {
   const t = text.toLowerCase();
   // SOURCING vs FORWARDING filter
@@ -369,7 +394,11 @@ export async function chatWithAgent(history: ChatMsg[], userMessage: string, sco
   // even when not scoped to a specific job — they operate across the office.
   const merge = detectMergeIntent(userMessage);
   if (merge.kind === "all-into-one") {
-    const r = await mergeAllOpenInquiriesIntoOne({ type: merge.type });
+    // Try a quick spec extraction from the message so the keeper inherits
+    // operator-stated subject/commodity/destination/weight without needing
+    // the AI fallback path.
+    const specs = extractMergeSpecs(userMessage);
+    const r = await mergeAllOpenInquiriesIntoOne({ type: merge.type, ...specs });
     if ("error" in r) return { reply: `Couldn't consolidate: ${r.error}` };
     if (r.mergedCount === 0) return { reply: `Nothing to consolidate — only one open ${merge.type ?? ""} inquiry exists.` };
     const linkBit = r.keeperJobId ? ` Open it on the jobs board.` : "";
@@ -514,7 +543,14 @@ export async function chatWithAgent(history: ChatMsg[], userMessage: string, sco
   });
 
   if (aiIntent.intent === "merge-all-into-one") {
-    const r = await mergeAllOpenInquiriesIntoOne({ type: aiIntent.type });
+    const r = await mergeAllOpenInquiriesIntoOne({
+      type: aiIntent.type,
+      subject: aiIntent.subject,
+      commodity: aiIntent.commodity,
+      origin: aiIntent.origin,
+      destination: aiIntent.destination,
+      weightKg: aiIntent.weightKg,
+    });
     if ("error" in r) return { reply: `Couldn't consolidate: ${r.error}` };
     if (r.mergedCount === 0) return { reply: `Only one open inquiry exists — nothing to merge.` };
     return { reply: `Consolidated ${r.mergedCount + 1} inquiries into one: "${r.subject}". Open the jobs board to confirm or rename.` };

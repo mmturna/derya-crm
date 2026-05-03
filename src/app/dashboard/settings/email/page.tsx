@@ -37,6 +37,12 @@ export default async function EmailSettingsPage({
 
   const active = accounts.filter((a) => a.isActive);
   const oauthConfigured = !!process.env.GOOGLE_CLIENT_ID;
+  // Accounts connected before the gmail.send scope was added need to be
+  // reconnected before AI replies can actually deliver. We can't tell from
+  // the DB alone, so show a soft prompt for any account whose lastSyncAt
+  // predates the scope rollout.
+  const SCOPE_ROLLOUT = new Date("2026-05-02T22:00:00Z");
+  const needsReauth = active.filter((a) => !a.lastSyncAt || new Date(a.lastSyncAt) < SCOPE_ROLLOUT);
 
   return (
     <div style={{ maxWidth: 760 }}>
@@ -63,6 +69,21 @@ export default async function EmailSettingsPage({
           fontSize: 13, color: "var(--text)",
         }}>
           Connected <strong>{sp.oauth_success}</strong>. Click <em>Sync now</em> below to fetch the last 7 days.
+        </div>
+      )}
+      {needsReauth.length > 0 && (
+        <div style={{
+          padding: "12px 16px", marginBottom: 16, borderRadius: "var(--radius)",
+          background: "var(--surface)", border: "1px solid var(--border)", borderLeft: "3px solid var(--brand)",
+          fontSize: 13, color: "var(--text)",
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>Reconnect to enable Send</div>
+          <p style={{ fontSize: 12.5, color: "var(--text-2)", marginBottom: 8 }}>
+            We added a Gmail Send permission for AI-drafted replies. Reconnect each inbox below to grant it. Read-only sync still works without this — but the Send button in draft modals will fail until you reconnect.
+          </p>
+          <div style={{ fontSize: 11, color: "var(--text-3)" }}>
+            {needsReauth.map((a) => a.email).join(", ")}
+          </div>
         </div>
       )}
       {sp.oauth_error && (

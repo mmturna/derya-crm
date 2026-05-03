@@ -146,6 +146,13 @@ Rules:
 // jobs. CONFIRMED jobs are NEVER auto-merged.
 export async function mergeAllOpenInquiriesIntoOne(args: {
   type?: "SOURCING" | "FORWARDING";
+  // Operator overrides for the keeper. When set, these win over the AI-
+  // generated subject/commodity and pre-fill missing route/weight fields.
+  subject?: string;
+  commodity?: string;
+  origin?: string;
+  destination?: string;
+  weightKg?: number;
 } = {}): Promise<
   | { ok: true; mergedCount: number; keeperInquiryId: string; keeperJobId: string | null; subject: string }
   | { error: string }
@@ -243,14 +250,25 @@ The commodity field should be a comma-separated list of the underlying commoditi
     await prisma.inquiry.delete({ where: { id: loser.id } }).catch(() => {});
   }
 
+  // Apply operator overrides if provided.
+  const finalSubject = args.subject?.trim() || newSubject;
+  const finalCommodity = args.commodity?.trim() || newCommodity;
+  const finalOrigin = args.origin?.trim() ?? null;
+  const finalDestination = args.destination?.trim() ?? null;
+  const finalWeight = typeof args.weightKg === "number" ? args.weightKg : null;
+
   // Update the keeper with the merged subject + commodity, and append an audit note.
   const auditNote = `\n\n[Auto-consolidated ${losers.length} inquiries on ${new Date().toISOString().split("T")[0]}: ${losers.map((l) => `"${l.subject}"`).join(", ")}]`;
+  const keeperInqData: Record<string, unknown> = {
+    subject: finalSubject,
+    commodity: finalCommodity,
+  };
+  if (finalOrigin) keeperInqData.origin = finalOrigin;
+  if (finalDestination) keeperInqData.destination = finalDestination;
+  if (finalWeight != null) keeperInqData.weight = finalWeight;
   await prisma.inquiry.update({
     where: { id: keeper.id },
-    data: {
-      subject: newSubject,
-      commodity: newCommodity,
-    },
+    data: keeperInqData,
   });
   await prisma.$executeRaw`UPDATE "Inquiry" SET "notes" = COALESCE("notes", '') || ${auditNote} WHERE "id" = ${keeper.id}`;
 
@@ -258,13 +276,18 @@ The commodity field should be a comma-separated list of the underlying commoditi
   await ensureProposedJobsForOpenInquiries(session.officeId);
   const keeperJob = await prisma.job.findFirst({
     where: { inquiryId: keeper.id },
-    select: { id: true, commodity: true },
+    select: { id: true, commodity: true, origin: true, destination: true, weight: true },
   });
-  if (keeperJob && (keeperJob.commodity == null || keeperJob.commodity === "")) {
-    await prisma.job.update({
-      where: { id: keeperJob.id },
-      data: { commodity: newCommodity },
-    });
+  if (keeperJob) {
+    const jobUpdate: Record<string, unknown> = {};
+    if ((keeperJob.commodity == null || keeperJob.commodity === "")) jobUpdate.commodity = finalCommodity;
+    else if (args.commodity) jobUpdate.commodity = finalCommodity;     // operator override always wins
+    if (finalOrigin && (keeperJob.origin == null || args.origin)) jobUpdate.origin = finalOrigin;
+    if (finalDestination && (keeperJob.destination == null || args.destination)) jobUpdate.destination = finalDestination;
+    if (finalWeight != null && (keeperJob.weight == null || args.weightKg)) jobUpdate.weight = finalWeight;
+    if (Object.keys(jobUpdate).length > 0) {
+      await prisma.job.update({ where: { id: keeperJob.id }, data: jobUpdate });
+    }
   }
 
   revalidatePath("/dashboard/rfq");
@@ -275,6 +298,6 @@ The commodity field should be a comma-separated list of the underlying commoditi
     mergedCount: losers.length,
     keeperInquiryId: keeper.id,
     keeperJobId: keeperJob?.id ?? null,
-    subject: newSubject,
+    subject: finalSubject,
   };
 }

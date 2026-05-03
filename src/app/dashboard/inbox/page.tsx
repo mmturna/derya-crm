@@ -342,10 +342,43 @@ export default async function InboxPage({
                 Go to email settings
               </a>
             </>
+          ) : searchQuery ? (
+            <>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>No matches for &quot;{searchQuery}&quot;</div>
+              <p style={{ fontSize: 13, color: "var(--text-3)" }}>
+                Try a sender domain, a commodity name, or a port. Search covers subjects, bodies, and senders.
+              </p>
+            </>
+          ) : filter === "_NEEDS_REPLY" ? (
+            <>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>Inbox zero on replies</div>
+              <p style={{ fontSize: 13, color: "var(--text-3)" }}>
+                Every active thread has an outbound reply after the last inbound message. Nice work.
+              </p>
+            </>
+          ) : filter === "_HIDDEN" ? (
+            <>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>No hidden threads</div>
+              <p style={{ fontSize: 13, color: "var(--text-3)" }}>
+                Hidden threads are ones you (or AI) marked as not freight-related. They still sync, they just stay out of the way.
+              </p>
+            </>
+          ) : filter === "_SNOOZED" ? (
+            <>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>No snoozed threads</div>
+              <p style={{ fontSize: 13, color: "var(--text-3)" }}>
+                Snooze a thread from the row to make it disappear until later (4h / tomorrow / next Monday).
+              </p>
+            </>
           ) : (
-            <div style={{ fontSize: 13, color: "var(--text-3)" }}>
-              No threads match this filter.
-            </div>
+            <>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>Inbox is calm</div>
+              <p style={{ fontSize: 13, color: "var(--text-3)" }}>
+                {totalSnoozed > 0 ? `${totalSnoozed} thread${totalSnoozed === 1 ? "" : "s"} snoozed. ` : ""}
+                {totalHidden > 0 ? `${totalHidden} hidden as not freight-related. ` : ""}
+                Click <strong>Sync now</strong> in <a href="/dashboard/settings/email" style={{ color: "var(--brand)" }}>Email Settings</a> to pull fresh mail manually, or wait — the platform auto-syncs every 15 minutes.
+              </p>
+            </>
           )}
         </div>
       ) : view === "loads" ? (
