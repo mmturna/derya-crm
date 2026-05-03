@@ -192,44 +192,45 @@ export async function chatWithAgent(history: ChatMsg[], userMessage: string, sco
   // Allow up to 8 sequential tool calls per turn (lookup → mutation → confirm).
   const MAX_TOOL_TURNS = 8;
   let lastTextReply = "";
-  for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
-    const response = await client.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 1024,
-      system: SYSTEM + "\n\n" + ctx + scopedCtx,
-      tools: TOOLS as any,
-      messages,
-    });
-
-    // Collect any text blocks for the final reply
-    const textBlocks = response.content.filter((b: any) => b.type === "text") as any[];
-    if (textBlocks.length) lastTextReply = textBlocks.map((b) => b.text).join("\n").trim();
-
-    // No tool calls? We're done.
-    if (response.stop_reason !== "tool_use") {
-      return { reply: lastTextReply || "(no reply)" };
-    }
-
-    // Append the assistant turn (text + tool_use blocks) to history.
-    messages.push({ role: "assistant", content: response.content });
-
-    // Execute each tool the model requested.
-    const toolUseBlocks = response.content.filter((b: any) => b.type === "tool_use") as any[];
-    const toolResults: any[] = [];
-    for (const tu of toolUseBlocks) {
-      const r = await dispatchTool(tu.name, (tu.input ?? {}) as Record<string, unknown>, {
-        officeId: session.officeId,
-        scopeJobId,
+  try {
+    for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+      const response = await client.messages.create({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 1024,
+        system: SYSTEM + "\n\n" + ctx + scopedCtx,
+        tools: TOOLS as any,
+        messages,
       });
-      toolResults.push({
-        type: "tool_result",
-        tool_use_id: tu.id,
-        content: JSON.stringify(r),
-        is_error: !r.ok,
-      });
+
+      const textBlocks = response.content.filter((b: any) => b.type === "text") as any[];
+      if (textBlocks.length) lastTextReply = textBlocks.map((b) => b.text).join("\n").trim();
+
+      if (response.stop_reason !== "tool_use") {
+        return { reply: lastTextReply || "(no reply)" };
+      }
+
+      messages.push({ role: "assistant", content: response.content });
+
+      const toolUseBlocks = response.content.filter((b: any) => b.type === "tool_use") as any[];
+      const toolResults: any[] = [];
+      for (const tu of toolUseBlocks) {
+        const r = await dispatchTool(tu.name, (tu.input ?? {}) as Record<string, unknown>, {
+          officeId: session.officeId,
+          scopeJobId,
+        });
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: tu.id,
+          content: JSON.stringify(r),
+          is_error: !r.ok,
+        });
+      }
+      messages.push({ role: "user", content: toolResults });
     }
-    messages.push({ role: "user", content: toolResults });
+    return { reply: lastTextReply || "Reached tool-call limit without a final answer. Try a more specific request." };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[agent-chat] tool-use loop failed:", msg, e);
+    return { reply: `Agent error — ${msg.slice(0, 400)}` };
   }
-
-  return { reply: lastTextReply || "Reached tool-call limit without a final answer. Try a more specific request." };
 }
