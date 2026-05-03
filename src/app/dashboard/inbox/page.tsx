@@ -66,7 +66,7 @@ export default async function InboxPage({
   const sp = await searchParams;
   const filter = sp.filter ?? "";
   const accountFilter = sp.account ?? "";
-  const view = sp.view === "loads" ? "loads" : "threads";
+  const view = sp.view === "loads" ? "loads" : sp.view === "rfqs" ? "rfqs" : "threads";
   const searchQuery = (sp.q ?? "").trim();
   const jobFilter = sp.job?.trim() || "";
   const inquiryFilter = sp.inquiry?.trim() || "";
@@ -216,6 +216,18 @@ export default async function InboxPage({
     if (key === "_ALL") return totalAll;
     return 0;
   }
+
+  // RFQs view: structured inquiry list (replaces the standalone /dashboard/rfq page).
+  const rfqs = view === "rfqs" ? await prisma.inquiry.findMany({
+    where: { officeId: session.officeId },
+    include: {
+      company: { select: { id: true, name: true } },
+      job: { select: { id: true, reference: true, status: true } },
+      _count: { select: { emailThreads: true } },
+    },
+    orderBy: { receivedAt: "desc" },
+    take: 100,
+  }) : [];
 
   // Open inquiries shown in the bulk-action "Link to load" picker.
   const openInquiriesForBulk = (await prisma.inquiry.findMany({
@@ -376,13 +388,14 @@ export default async function InboxPage({
         })}
         <div style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center", padding: 2, borderRadius: 4, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
           {[
-            { key: "threads", label: "By message" },
+            { key: "threads", label: "Threads" },
             { key: "loads",   label: "By load" },
+            { key: "rfqs",    label: "RFQs" },
           ].map((v) => {
             const isActive = view === v.key;
             const filterQs = filter ? `filter=${filter}` : "";
             const accountQs = accountFilter ? `&account=${accountFilter}` : "";
-            const viewQs = v.key === "loads" ? "&view=loads" : "";
+            const viewQs = v.key === "threads" ? "" : `&view=${v.key}`;
             return (
               <a
                 key={v.key}
@@ -434,7 +447,9 @@ export default async function InboxPage({
 
       <BulkActionBar inquiries={openInquiriesForBulk} />
 
-      {threads.length === 0 ? (
+      {view === "rfqs" ? (
+        <RfqListView rfqs={rfqs} />
+      ) : threads.length === 0 ? (
         <div className="card" style={{ padding: "40px 24px", textAlign: "center" }}>
           {accounts.length === 0 ? (
             <>
@@ -667,6 +682,108 @@ function TypeBadge({ type }: { type: string }) {
     }}>{isSourcing ? "SOURCING" : "FORWARDING"}</span>
   );
 }
+
+type RfqRow = {
+  id: string;
+  subject: string;
+  type: string;
+  status: string;
+  fromEmail: string | null;
+  fromCompany: string | null;
+  origin: string | null;
+  destination: string | null;
+  mode: string | null;
+  receivedAt: Date;
+  company: { id: string; name: string } | null;
+  job: { id: string; reference: string; status: string } | null;
+  _count: { emailThreads: number };
+};
+
+const RFQ_STATUS_META: Record<string, { label: string; cls: string }> = {
+  INGESTED: { label: "New",    cls: "badge-info" },
+  PARSED:   { label: "Parsed", cls: "badge-neutral" },
+  PRICED:   { label: "Priced", cls: "badge-warn" },
+  QUOTED:   { label: "Quoted", cls: "badge-good" },
+  WON:      { label: "Won",    cls: "badge-good" },
+  LOST:     { label: "Lost",   cls: "badge-danger" },
+};
+
+function RfqListView({ rfqs }: { rfqs: RfqRow[] }) {
+  if (rfqs.length === 0) {
+    return (
+      <div className="card" style={{ padding: "40px 24px", textAlign: "center" }}>
+        <div style={{ fontWeight: 600, marginBottom: 6 }}>No RFQs yet</div>
+        <p style={{ fontSize: 13, color: "var(--text-3)" }}>
+          RFQs are created from email threads (manually or by the AI auto-link). Switch to Threads view to see incoming mail.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="card" style={{ overflow: "hidden" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+        <thead>
+          <tr style={{ background: "var(--surface-2)", color: "var(--text-3)", textAlign: "left" }}>
+            <th style={thStyle}>Subject</th>
+            <th style={thStyle}>Customer / sender</th>
+            <th style={thStyle}>Route</th>
+            <th style={thStyle}>Type</th>
+            <th style={thStyle}>Status</th>
+            <th style={thStyle}>Job</th>
+            <th style={thStyle}>Threads</th>
+            <th style={thStyle}>Received</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rfqs.map((r) => {
+            const sm = RFQ_STATUS_META[r.status] ?? { label: r.status, cls: "badge-neutral" };
+            return (
+              <tr key={r.id} style={{ borderTop: "1px solid var(--border)" }}>
+                <td style={tdStyle}>
+                  <a href={`/dashboard/rfq/${r.id}`} style={{ color: "var(--text)", textDecoration: "none", fontWeight: 600 }}>
+                    {r.subject}
+                  </a>
+                </td>
+                <td style={tdStyle}>
+                  <div style={{ color: "var(--text)" }}>{r.company?.name ?? r.fromCompany ?? "—"}</div>
+                  {r.fromEmail && <div style={{ fontSize: 11, color: "var(--text-3)" }}>{r.fromEmail}</div>}
+                </td>
+                <td style={tdStyle}>
+                  {r.origin || r.destination ? (
+                    <span style={{ color: "var(--text-2)" }}>{r.origin ?? "?"} → {r.destination ?? "?"}</span>
+                  ) : <span style={{ color: "var(--text-3)" }}>—</span>}
+                  {r.mode && <div style={{ fontSize: 11, color: "var(--text-3)" }}>{r.mode}</div>}
+                </td>
+                <td style={tdStyle}><TypeBadge type={r.type} /></td>
+                <td style={tdStyle}><span className={`badge ${sm.cls}`}>{sm.label}</span></td>
+                <td style={tdStyle}>
+                  {r.job ? (
+                    <a href={`/dashboard/jobs/${r.job.id}`} style={{ color: "var(--brand)", textDecoration: "none", fontSize: 12, fontWeight: 600 }}>
+                      {r.job.reference}
+                    </a>
+                  ) : <span style={{ color: "var(--text-3)" }}>—</span>}
+                </td>
+                <td style={tdStyle}>
+                  {r._count.emailThreads > 0 ? (
+                    <a href={`/dashboard/inbox?inquiry=${r.id}`} style={{ color: "var(--brand)", textDecoration: "none", fontSize: 12 }}>
+                      {r._count.emailThreads}
+                    </a>
+                  ) : <span style={{ color: "var(--text-3)" }}>0</span>}
+                </td>
+                <td style={{ ...tdStyle, fontSize: 11.5, color: "var(--text-3)" }}>
+                  {new Date(r.receivedAt).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+const thStyle: React.CSSProperties = { padding: "10px 14px", fontWeight: 600, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" };
+const tdStyle: React.CSSProperties = { padding: "12px 14px", verticalAlign: "top" };
 
 function chipStyle(active: boolean, variant: "default" | "dark" = "default"): React.CSSProperties {
   const dark = variant === "dark";
