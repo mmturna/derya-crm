@@ -32,9 +32,27 @@ Your job:
     3. Populate a job's load details from its linked emails (when scoped to a job).
     4. Award a supplier (when scoped to a SOURCING job): "award the cheapest", "go with ORLAZUL", "select the best offer". Picks the cheapest priced offer or the named supplier, advances the job to "Awarded", and drafts a confirmation email.
     5. Draft a reply to the latest inbound message on a job: "draft a reply", "write a response", "compose an email back to them". Optionally pass intent like "counter at $480/MT" or "ask for sample".
+    6. List threads awaiting a reply: "what needs reply", "what's pending", "who's waiting on me".
+    7. Hide unrelated threads in bulk: "hide unrelated", "mark spam as unrelated", "dismiss the noise".
   Never tell the user you "can't create / can't merge / it's a workflow they need to do manually" — these actions exist. If the request is ambiguous, run the action you think is closest and report what changed.`;
 
 const RFQ_KEYWORDS = /\b(FCL|LCL|RFQ|quote|shipment|container|ETD|ETA|freight|cargo|BL|TEU|shipping|Incoterms|EXW|FOB|DAP|DDP|forwarder|carrier|ocean|airfreight|trucking)\b/i;
+
+function detectNeedsReplyIntent(text: string): boolean {
+  const t = text.toLowerCase();
+  return /\b(what|which|who).*(need|needs|awaiting|waiting|pending).*(reply|response|answer|action)\b/.test(t)
+    || /\b(awaiting reply|pending reply|needs reply|haven'?t replied|no response yet)\b/.test(t)
+    || /\b(what should i (do|reply|answer|respond)|what's next)\b/.test(t);
+}
+
+function detectHideIntent(text: string): { matched: boolean; subjectHint?: string } {
+  const t = text.toLowerCase();
+  if (!/\b(hide|mark|flag|dismiss|ignore|skip|exclude)\b/.test(t)) return { matched: false };
+  if (!/\b(unrelated|spam|noise|not[\s-]?freight|irrelevant|junk|newsletter|marketing|notification)\b/.test(t)) return { matched: false };
+  // try to capture a subject hint
+  const m = t.match(/(?:about|with subject|named|called|titled)\s+["']?([^"']{3,80})["']?/);
+  return { matched: true, subjectHint: m?.[1]?.trim() };
+}
 
 function detectAwardIntent(text: string): { matched: boolean; supplierHint?: string } {
   const t = text.toLowerCase();
@@ -228,6 +246,60 @@ export async function chatWithAgent(history: ChatMsg[], userMessage: string, sco
       reply: `Captured RFQ "${subject}" in the inbox. AI parsing didn't return clean JSON — open the RFQ to fill fields manually.`,
       ingestedInquiryId: inquiry.id,
     };
+  }
+
+  // Branch 1.3: "What needs reply?" — list awaiting-reply threads.
+  if (detectNeedsReplyIntent(userMessage)) {
+    const candidates = await prisma.emailThread.findMany({
+      where: { officeId: session.officeId, hiddenAt: null },
+      include: {
+        messages: { orderBy: { sentAt: "desc" }, take: 1 },
+        job: { select: { reference: true } },
+        inquiry: { select: { subject: true } },
+      },
+      orderBy: { lastMessageAt: "desc" },
+      take: 100,
+    });
+    const awaiting = candidates.filter((t) => t.messages[0]?.direction === "INBOUND").slice(0, 8);
+    if (awaiting.length === 0) {
+      return { reply: "Inbox zero — no inbound threads waiting on a reply." };
+    }
+    const lines = awaiting.map((t) => {
+      const last = t.messages[0];
+      const tag = t.job?.reference ?? t.inquiry?.subject ?? "(unlinked)";
+      return `· "${t.subject}" — ${tag} · last from ${last.fromName ?? last.fromEmail}`;
+    });
+    return {
+      reply: `${awaiting.length} thread${awaiting.length === 1 ? "" : "s"} awaiting your reply:\n\n${lines.join("\n")}\n\nOpen the inbox "Awaiting reply" filter to draft replies.`,
+    };
+  }
+
+  // Branch 1.35: "Hide unrelated threads" — quick triage helper.
+  const hideIntent = detectHideIntent(userMessage);
+  if (hideIntent.matched) {
+    // Find unlinked threads classified as OTHER and hide them in bulk.
+    const cands = await prisma.emailThread.findMany({
+      where: {
+        officeId: session.officeId,
+        hiddenAt: null,
+        jobId: null,
+        inquiryId: null,
+        messages: {
+          every: { OR: [{ classification: "OTHER" }, { classification: null }] },
+        },
+      },
+      take: 100,
+      select: { id: true },
+    });
+    if (cands.length === 0) {
+      return { reply: "No obviously-unrelated threads to hide. Open the inbox and use the Hide button on specific threads." };
+    }
+    await prisma.emailThread.updateMany({
+      where: { id: { in: cands.map((c) => c.id) } },
+      data: { hiddenAt: new Date() },
+    });
+    revalidatePath("/dashboard/inbox");
+    return { reply: `Hid ${cands.length} unlinked thread${cands.length === 1 ? "" : "s"} classified as not freight-related. They're still under the "Hidden" filter if you need to recover any.` };
   }
 
   // Branch 1.4: Detect merge/consolidate intents before generic chat. These run

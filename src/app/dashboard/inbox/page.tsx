@@ -5,11 +5,15 @@ import { CreateInquiryButton } from "@/components/create-inquiry-button";
 import { ThreadAccordion } from "@/components/thread-accordion";
 import { MergeDuplicatesButton } from "@/components/merge-duplicates-button";
 import { InboxQuickReply } from "@/components/inbox-quick-reply";
+import { HideThreadButton } from "@/components/hide-thread-button";
 
 const FILTERS = [
-  { key: "",                label: "All threads" },
-  { key: "_UNLINKED",       label: "Unlinked" },
-  { key: "_LINKED",         label: "Linked to a load" },
+  { key: "",                  label: "Active"          },  // default — excludes hidden
+  { key: "_NEEDS_REPLY",      label: "Awaiting reply"  },
+  { key: "_UNLINKED",         label: "Unlinked"        },
+  { key: "_LINKED",           label: "Linked to a load"},
+  { key: "_HIDDEN",           label: "Hidden"          },
+  { key: "_ALL",              label: "All (incl hidden)"},
 ] as const;
 
 function timeAgo(d: Date) {
@@ -51,12 +55,13 @@ function dominantKind(messages: { direction: string; classification: string | nu
 export default async function InboxPage({
   searchParams,
 }: {
-  searchParams: Promise<{ filter?: string; account?: string }>;
+  searchParams: Promise<{ filter?: string; account?: string; view?: string }>;
 }) {
   const session = await requireSession();
   const sp = await searchParams;
   const filter = sp.filter ?? "";
   const accountFilter = sp.account ?? "";
+  const view = sp.view === "loads" ? "loads" : "threads";
 
   const accounts = await prisma.emailAccount.findMany({
     where: { officeId: session.officeId, isActive: true },
@@ -65,18 +70,27 @@ export default async function InboxPage({
 
   // Threads with messages, plus their linked job/inquiry
   const where: any = { officeId: session.officeId };
-  if (filter === "_UNLINKED") {
-    where.jobId = null;
-    where.inquiryId = null;
-  } else if (filter === "_LINKED") {
-    where.OR = [{ jobId: { not: null } }, { inquiryId: { not: null } }];
+  // Default ("Active") excludes hidden. Other filters opt-in.
+  if (filter === "_HIDDEN") {
+    where.hiddenAt = { not: null };
+  } else if (filter === "_ALL") {
+    // no hidden filter
+  } else {
+    where.hiddenAt = null;
+    if (filter === "_UNLINKED") {
+      where.jobId = null;
+      where.inquiryId = null;
+    } else if (filter === "_LINKED") {
+      where.OR = [{ jobId: { not: null } }, { inquiryId: { not: null } }];
+    } else if (filter === "_NEEDS_REPLY") {
+      // We approximate this with a query then filter in JS post-fetch (cheap with take 60)
+    }
   }
   if (accountFilter) {
-    // restrict to threads that have at least one message from this account
     where.messages = { some: { accountId: accountFilter } };
   }
 
-  const threads = await prisma.emailThread.findMany({
+  let threads = await prisma.emailThread.findMany({
     where,
     include: {
       messages: { orderBy: { sentAt: "asc" } },
@@ -84,23 +98,96 @@ export default async function InboxPage({
       inquiry: { select: { id: true, subject: true, type: true } },
     },
     orderBy: { lastMessageAt: "desc" },
-    take: 60,
+    take: filter === "_NEEDS_REPLY" ? 200 : 80,
   });
+
+  if (filter === "_NEEDS_REPLY") {
+    // Last message is INBOUND and there's no OUTBOUND message after it.
+    threads = threads.filter((t) => {
+      const last = t.messages[t.messages.length - 1];
+      return last && last.direction === "INBOUND";
+    }).slice(0, 80);
+  }
 
   // Counts for the filter chips
-  const totalUnlinked = await prisma.emailThread.count({
-    where: { officeId: session.officeId, jobId: null, inquiryId: null },
-  });
-  const totalLinked = await prisma.emailThread.count({
-    where: { officeId: session.officeId, OR: [{ jobId: { not: null } }, { inquiryId: { not: null } }] },
-  });
-  const totalAll = totalUnlinked + totalLinked;
+  const [totalActive, totalUnlinked, totalLinked, totalHidden, totalAll] = await Promise.all([
+    prisma.emailThread.count({ where: { officeId: session.officeId, hiddenAt: null } }),
+    prisma.emailThread.count({ where: { officeId: session.officeId, hiddenAt: null, jobId: null, inquiryId: null } }),
+    prisma.emailThread.count({ where: { officeId: session.officeId, hiddenAt: null, OR: [{ jobId: { not: null } }, { inquiryId: { not: null } }] } }),
+    prisma.emailThread.count({ where: { officeId: session.officeId, hiddenAt: { not: null } } }),
+    prisma.emailThread.count({ where: { officeId: session.officeId } }),
+  ]);
+  // "Awaiting reply" count is approximate: pull last messages directly via raw count of latest-inbound.
+  // Cheap heuristic: same query as fetched threads.
+  const totalNeedsReply = (await prisma.emailThread.findMany({
+    where: { officeId: session.officeId, hiddenAt: null },
+    include: { messages: { orderBy: { sentAt: "desc" }, take: 1 } },
+    take: 500,
+  })).filter((t) => t.messages[0]?.direction === "INBOUND").length;
 
   function countFor(key: string): number {
-    if (!key) return totalAll;
+    if (!key) return totalActive;
+    if (key === "_NEEDS_REPLY") return totalNeedsReply;
     if (key === "_UNLINKED") return totalUnlinked;
     if (key === "_LINKED") return totalLinked;
+    if (key === "_HIDDEN") return totalHidden;
+    if (key === "_ALL") return totalAll;
     return 0;
+  }
+
+  // For the "loads" view, group threads under their linked job/inquiry.
+  type LoadGroup = {
+    key: string;
+    type: "JOB" | "INQUIRY" | "UNLINKED";
+    title: string;
+    subtitle: string;
+    href: string | null;
+    threads: typeof threads;
+  };
+  const loadGroups: LoadGroup[] = [];
+  if (view === "loads") {
+    const map = new Map<string, LoadGroup>();
+    for (const t of threads) {
+      let key = "unlinked";
+      let group: LoadGroup;
+      if (t.job) {
+        key = `job:${t.job.id}`;
+        group = map.get(key) ?? {
+          key, type: "JOB",
+          title: `${t.job.reference} · ${t.job.company?.name ?? "no customer"}`,
+          subtitle: t.job.type === "SOURCING" ? "Procurement" : "Forwarding",
+          href: `/dashboard/jobs/${t.job.id}`,
+          threads: [],
+        };
+      } else if (t.inquiry) {
+        key = `inq:${t.inquiry.id}`;
+        group = map.get(key) ?? {
+          key, type: "INQUIRY",
+          title: t.inquiry.subject,
+          subtitle: t.inquiry.type === "SOURCING" ? "Procurement RFQ" : "Forwarding RFQ",
+          href: `/dashboard/rfq/${t.inquiry.id}`,
+          threads: [],
+        };
+      } else {
+        group = map.get(key) ?? {
+          key, type: "UNLINKED",
+          title: "Unlinked threads",
+          subtitle: "Not yet attached to a load",
+          href: null,
+          threads: [],
+        };
+      }
+      group.threads.push(t);
+      map.set(key, group);
+    }
+    // Order: unlinked first if any, then by most recent thread inside.
+    loadGroups.push(...[...map.values()].sort((a, b) => {
+      if (a.type === "UNLINKED") return 1;
+      if (b.type === "UNLINKED") return -1;
+      const aLast = a.threads[0]?.lastMessageAt?.getTime?.() ?? 0;
+      const bLast = b.threads[0]?.lastMessageAt?.getTime?.() ?? 0;
+      return bLast - aLast;
+    }));
   }
 
   return (
@@ -132,14 +219,15 @@ export default async function InboxPage({
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 6, marginBottom: 18, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
         {FILTERS.map((f) => {
           const accountQs = accountFilter ? `&account=${accountFilter}` : "";
+          const viewQs = view === "loads" ? "&view=loads" : "";
           const isActive = filter === f.key;
           return (
             <a
               key={f.key}
-              href={`/dashboard/inbox?${f.key ? `filter=${f.key}` : ""}${accountQs}`.replace(/^\?&/, "?")}
+              href={`/dashboard/inbox?${f.key ? `filter=${f.key}` : ""}${accountQs}${viewQs}`.replace(/^\?&/, "?").replace(/\?$/, "")}
               style={chipStyle(isActive, "dark")}
             >
               {f.label}
@@ -149,6 +237,30 @@ export default async function InboxPage({
             </a>
           );
         })}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center", padding: 2, borderRadius: 4, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
+          {[
+            { key: "threads", label: "By message" },
+            { key: "loads",   label: "By load" },
+          ].map((v) => {
+            const isActive = view === v.key;
+            const filterQs = filter ? `filter=${filter}` : "";
+            const accountQs = accountFilter ? `&account=${accountFilter}` : "";
+            const viewQs = v.key === "loads" ? "&view=loads" : "";
+            return (
+              <a
+                key={v.key}
+                href={`/dashboard/inbox?${filterQs}${accountQs}${viewQs}`.replace(/\?&/, "?").replace(/\?$/, "")}
+                style={{
+                  fontSize: 11.5, fontWeight: 600, padding: "4px 9px", borderRadius: 3,
+                  background: isActive ? "var(--surface)" : "transparent",
+                  color: isActive ? "var(--text)" : "var(--text-3)",
+                  textDecoration: "none",
+                  border: isActive ? "1px solid var(--border)" : "1px solid transparent",
+                }}
+              >{v.label}</a>
+            );
+          })}
+        </div>
       </div>
 
       {threads.length === 0 ? (
@@ -168,6 +280,46 @@ export default async function InboxPage({
               No threads match this filter.
             </div>
           )}
+        </div>
+      ) : view === "loads" ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {loadGroups.map((g) => (
+            <div key={g.key} className="card" style={{ overflow: "hidden", borderLeft: g.type === "UNLINKED" ? "3px solid transparent" : "3px solid var(--brand)" }}>
+              <div style={{ padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, borderBottom: "1px solid var(--border)", background: "var(--surface-2)" }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
+                    {g.href ? (
+                      <a href={g.href} style={{ color: "var(--text)", textDecoration: "none" }}>{g.title} →</a>
+                    ) : g.title}
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-3)", marginTop: 2 }}>
+                    {g.subtitle} · {g.threads.length} thread{g.threads.length === 1 ? "" : "s"}
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                {g.threads.map((t) => {
+                  const last = t.messages[t.messages.length - 1];
+                  return (
+                    <div key={t.id} style={{ padding: "10px 16px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "flex-start", gap: 10 }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {t.subject}
+                        </div>
+                        <div style={{ fontSize: 11, color: "var(--text-3)", marginTop: 2 }}>
+                          {t.messages.length} msg · {timeAgo(t.lastMessageAt)}{last ? ` · last from ${last.fromName ?? last.fromEmail}` : ""}
+                        </div>
+                      </div>
+                      <div style={{ display: "inline-flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                        <InboxQuickReply threadId={t.id} threadSubject={t.subject} />
+                        <HideThreadButton threadId={t.id} hidden={!!t.hiddenAt} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -224,6 +376,7 @@ export default async function InboxPage({
                       {!linked && (
                         <CreateInquiryButton threadId={t.id} />
                       )}
+                      <HideThreadButton threadId={t.id} hidden={!!t.hiddenAt} />
                     </div>
                   </div>
 

@@ -9,6 +9,7 @@ import {
 } from "./actions";
 import { Icon } from "@/components/icon";
 import { PopulateJobButton } from "@/components/populate-job-button";
+import { SourcingOffersTable } from "@/components/sourcing-offers-table";
 
 const STATUS_ORDER = ["INQUIRY", "QUOTED", "BOOKED", "IN_TRANSIT", "CUSTOMS", "DELIVERED"] as const;
 const STATUS_LABEL: Record<string, string> = {
@@ -342,7 +343,28 @@ export default async function JobDetailPage({
             </div>
           </div>
 
-          {/* Carrier / Procurement */}
+          {/* Procurement: supplier offers comparison */}
+          {job.type === "SOURCING" && job.inquiry && (
+            <SourcingOffersTable
+              inquiryId={job.inquiry.id}
+              rows={job.emailThreads.map((t) => {
+                let offer: Record<string, unknown> | null = null;
+                if (t.supplierOffer) { try { offer = JSON.parse(t.supplierOffer); } catch {} }
+                const firstInbound = t.messages.find((m) => m.direction === "INBOUND");
+                return {
+                  threadId: t.id,
+                  threadSubject: t.subject,
+                  fromEmail: firstInbound?.fromEmail ?? null,
+                  lastMessageAt: t.lastMessageAt.toISOString(),
+                  awardedAt: t.awardedAt ? t.awardedAt.toISOString() : null,
+                  offer: offer as never,
+                };
+              })}
+            />
+          )}
+
+          {/* Forwarding: carrier rates */}
+          {job.type === "FORWARDING" && (
           <div className="card">
             <div className="worktable-section-header">
               Carrier
@@ -418,6 +440,7 @@ export default async function JobDetailPage({
               </details>
             )}
           </div>
+          )}
 
           {/* Milestones */}
           <div className="card">

@@ -347,15 +347,37 @@ export async function attachThreadToJob(threadId: string, jobId: string): Promis
 
 export async function markThreadUnrelated(threadId: string): Promise<void> {
   const session = await requireSession();
-  await prisma.emailThread.findFirst({ where: { id: threadId, officeId: session.officeId } });
-  // We don't have a "marked unrelated" flag; for now just clear any links
+  const found = await prisma.emailThread.findFirst({ where: { id: threadId, officeId: session.officeId } });
+  if (!found) return;
   await prisma.emailThread.update({
     where: { id: threadId },
-    data: { jobId: null, inquiryId: null },
+    data: { jobId: null, inquiryId: null, hiddenAt: new Date() },
   });
   await prisma.emailMessage.updateMany({
     where: { threadId },
     data: { classification: "OTHER", classificationReason: "Manually marked unrelated" },
+  });
+  revalidatePath("/dashboard/inbox");
+}
+
+export async function hideThread(threadId: string): Promise<void> {
+  const session = await requireSession();
+  const found = await prisma.emailThread.findFirst({ where: { id: threadId, officeId: session.officeId } });
+  if (!found) return;
+  await prisma.emailThread.update({
+    where: { id: threadId },
+    data: { hiddenAt: new Date() },
+  });
+  revalidatePath("/dashboard/inbox");
+}
+
+export async function unhideThread(threadId: string): Promise<void> {
+  const session = await requireSession();
+  const found = await prisma.emailThread.findFirst({ where: { id: threadId, officeId: session.officeId } });
+  if (!found) return;
+  await prisma.emailThread.update({
+    where: { id: threadId },
+    data: { hiddenAt: null },
   });
   revalidatePath("/dashboard/inbox");
 }
