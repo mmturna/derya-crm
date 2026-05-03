@@ -63,13 +63,155 @@ function makeDemoPdfDataUrl(title: string, lines: string[]): string {
 // - Portal token populated
 //
 // Idempotent — returns the existing demo job if one already exists.
+// Upgrade an already-seeded demo job to the richer state: IN_TRANSIT,
+// all 5 docs APPROVED with AI commentary, more milestones marked done.
+// Idempotent — safe to call repeatedly.
+async function upgradeExistingDemoLoad(jobId: string, officeId: string): Promise<void> {
+  // Bump status
+  await prisma.job.update({
+    where: { id: jobId },
+    data: { status: "IN_TRANSIT" },
+  });
+
+  // Push milestones forward — BOOKING / CARGO_READY / ETD all done
+  const job = await prisma.job.findUnique({
+    where: { id: jobId },
+    select: { eta: true, milestones: { select: { id: true, type: true, actualAt: true } } },
+  });
+  const eta = job?.eta ?? new Date(Date.now() + 16 * 86400000);
+  const milestoneTargets: Record<string, { actualAt?: Date; plannedAt?: Date }> = {
+    BOOKING:    { plannedAt: new Date(Date.now() - 8 * 86400000), actualAt: new Date(Date.now() - 7 * 86400000) },
+    CARGO_READY:{ plannedAt: new Date(Date.now() - 5 * 86400000), actualAt: new Date(Date.now() - 5 * 86400000) },
+    ETD:        { plannedAt: new Date(Date.now() - 3 * 86400000), actualAt: new Date(Date.now() - 3 * 86400000) },
+    ETA:        { plannedAt: eta },
+    CUSTOMS_ENTRY:   { plannedAt: new Date(eta.getTime() + 86400000) },
+    CUSTOMS_RELEASE: { plannedAt: new Date(eta.getTime() + 2 * 86400000) },
+    DELIVERY:        { plannedAt: new Date(eta.getTime() + 3 * 86400000) },
+  };
+  for (const [type, target] of Object.entries(milestoneTargets)) {
+    const existing = job?.milestones.find((m) => m.type === type);
+    if (existing) {
+      const update: Record<string, unknown> = {};
+      if (target.actualAt && !existing.actualAt) update.actualAt = target.actualAt;
+      if (target.plannedAt) update.plannedAt = target.plannedAt;
+      if (Object.keys(update).length > 0) {
+        await prisma.jobMilestone.update({ where: { id: existing.id }, data: update });
+      }
+    } else {
+      await prisma.jobMilestone.create({ data: { jobId, type, ...target } });
+    }
+  }
+
+  // Promote any pending/uploaded demo doc, and add the missing COO + CUSTOMS
+  // with the same AI commentary the new seed produces.
+  const docs = await prisma.jobDocument.findMany({
+    where: { jobId },
+    select: { id: true, docType: true, status: true, url: true },
+  });
+  // Approve packing list if it's still UPLOADED.
+  for (const d of docs) {
+    if (d.docType === "PACKING_LIST" && d.status !== "APPROVED" && d.url) {
+      await prisma.jobDocument.update({ where: { id: d.id }, data: { status: "APPROVED" } });
+    }
+  }
+
+  // Add COO and Customs Declaration if they don't have URLs yet.
+  const cooDoc = docs.find((d) => d.docType === "COO");
+  if (!cooDoc || !cooDoc.url) {
+    const cooData = {
+      jobId,
+      officeId,
+      name: "COO_RO-2026-04781.pdf",
+      docType: "COO",
+      status: "APPROVED",
+      url: makeDemoPdfDataUrl("Certificate of Origin — RO-2026-04781", [
+        "CERTIFICATE OF ORIGIN",
+        "Certificate No: RO-2026-04781",
+        "Issuing authority: Romanian Chamber of Commerce, Constanta",
+        "Country of origin: ROMANIA",
+        "Exporter: Black Sea Trading Co · Constanta, RO",
+        "Consignee: Hamburg Cold Storage GmbH · Hamburg, DE",
+        "Goods: Cold-rolled steel coils, 18 MT",
+        "HS Code: 7209.16   Invoice ref: BST-2104",
+        "Container: MEDU2891744 (40HC)",
+        "Issued: 02 May 2026   Valid: 30 days",
+      ]),
+      aiSummary: "EUR.1 / Romanian Chamber of Commerce Certificate of Origin RO-2026-04781 confirming Romanian origin for the steel coils. Matches invoice BST-2104 and BL container MEDU2891744. HS code 7209.16.",
+      aiFlags: JSON.stringify([]),
+      aiKeyFields: JSON.stringify({
+        certificate_no: "RO-2026-04781",
+        country_of_origin: "Romania",
+        exporter: "Black Sea Trading Co",
+        consignee: "Hamburg Cold Storage GmbH",
+        hs_codes: ["7209.16"],
+        invoice_ref: "BST-2104",
+        issued: "2026-05-02",
+        validity_days: 30,
+      }),
+      aiAnalyzedAt: new Date(),
+    };
+    if (cooDoc) await prisma.jobDocument.update({ where: { id: cooDoc.id }, data: cooData });
+    else await prisma.jobDocument.create({ data: cooData });
+  }
+
+  const customsDoc = docs.find((d) => d.docType === "CUSTOMS");
+  if (!customsDoc || !customsDoc.url) {
+    const customsData = {
+      jobId,
+      officeId,
+      name: "Customs_Declaration_DE-IM-2026-91102.pdf",
+      docType: "CUSTOMS",
+      status: "APPROVED",
+      url: makeDemoPdfDataUrl("Customs Declaration — DE/IM/2026/91102", [
+        "CUSTOMS DECLARATION (Import)",
+        "Declaration No: DE/IM/2026/91102",
+        "Filed by: Hamburg Customs Broker AG (broker code HB-2241)",
+        "Importer: Hamburg Cold Storage GmbH",
+        "Goods: Cold-rolled steel coils",
+        "HS Code: 7209.16",
+        "Customs value: USD 20,700",
+        "Duty rate: 0% (EUR.1 preference)",
+        "VAT: 19% on landed value (paid)",
+        "Container: MEDU2891744   Vessel: MSC ARIADNE / Voy 21W",
+        "Filed: 18 May 2026 (pre-arrival)",
+      ]),
+      aiSummary: "Pre-arrival customs declaration DE/IM/2026/91102 filed by Hamburg Customs Broker AG. Duty 0% under EUR.1 preference (matches the COO). VAT 19% paid on landed value of USD 20,700. Container/vessel match the BL.",
+      aiFlags: JSON.stringify([]),
+      aiKeyFields: JSON.stringify({
+        declaration_no: "DE/IM/2026/91102",
+        broker: "Hamburg Customs Broker AG",
+        importer: "Hamburg Cold Storage GmbH",
+        hs_code: "7209.16",
+        customs_value: 20700,
+        currency: "USD",
+        duty_rate: "0%",
+        vat_rate: "19%",
+        container: "MEDU2891744",
+        filed: "2026-05-18",
+      }),
+      aiAnalyzedAt: new Date(),
+    };
+    if (customsDoc) await prisma.jobDocument.update({ where: { id: customsDoc.id }, data: customsData });
+    else await prisma.jobDocument.create({ data: customsData });
+  }
+
+  revalidatePath(`/dashboard/jobs/${jobId}`);
+  revalidatePath("/dashboard/jobs");
+}
+
 export async function seedDemoLoad(args: { officeId: string }): Promise<{ ok: true; jobId: string; reference: string; created: boolean } | { error: string }> {
   // Check if a previous seed exists by looking for the marker in notes.
   const existing = await prisma.job.findFirst({
     where: { officeId: args.officeId, notes: { contains: "[DEMO_LOAD_SEED]" } },
     select: { id: true, reference: true },
   });
-  if (existing) return { ok: true, jobId: existing.id, reference: existing.reference, created: false };
+  if (existing) {
+    // Upgrade the existing demo to richer state (IN_TRANSIT, all 5 docs
+    // approved, more milestones confirmed). Useful when the seed shipped
+    // earlier and we now have new content to layer on.
+    await upgradeExistingDemoLoad(existing.id, args.officeId);
+    return { ok: true, jobId: existing.id, reference: existing.reference, created: false };
+  }
 
   // Look for orphaned demo state from a previous half-completed run:
   // an inquiry whose subject starts with "DEMO ·" but has no Job linked.
@@ -151,7 +293,7 @@ export async function seedDemoLoad(args: { officeId: string }): Promise<{ ok: tr
       companyId: company.id,
       inquiryId: inquiry.id,
       reference,
-      status: "BOOKED",
+      status: "IN_TRANSIT",
       type: "FORWARDING",
       mode: "SEA-FCL",
       origin: "Constanta, RO",
@@ -184,9 +326,11 @@ export async function seedDemoLoad(args: { officeId: string }): Promise<{ ok: tr
 
   // Milestones
   const ms = [
-    { type: "BOOKING",          plannedAt: new Date(Date.now() - 2 * 86400000), actualAt: new Date(Date.now() - 1 * 86400000) },
-    { type: "CARGO_READY",      plannedAt: new Date(Date.now() + 4 * 86400000), actualAt: null },
-    { type: "ETD",              plannedAt: etd, actualAt: null },
+    // Job is mid-shipment (IN_TRANSIT) — booking + cargo ready + ETD all hit;
+    // ETA still upcoming, customs + delivery pending.
+    { type: "BOOKING",          plannedAt: new Date(Date.now() - 8 * 86400000), actualAt: new Date(Date.now() - 7 * 86400000) },
+    { type: "CARGO_READY",      plannedAt: new Date(Date.now() - 5 * 86400000), actualAt: new Date(Date.now() - 5 * 86400000) },
+    { type: "ETD",              plannedAt: new Date(Date.now() - 3 * 86400000), actualAt: new Date(Date.now() - 3 * 86400000) },
     { type: "ETA",              plannedAt: eta, actualAt: null },
     { type: "CUSTOMS_ENTRY",    plannedAt: new Date(eta.getTime() + 86400000), actualAt: null },
     { type: "CUSTOMS_RELEASE",  plannedAt: new Date(eta.getTime() + 2 * 86400000), actualAt: null },
@@ -241,7 +385,7 @@ export async function seedDemoLoad(args: { officeId: string }): Promise<{ ok: tr
     {
       name: "Packing_List_BST-2104.pdf",
       docType: "PACKING_LIST",
-      status: "UPLOADED",
+      status: "APPROVED",
       url: makeDemoPdfDataUrl("Packing List — BST-2104", [
         "PACKING LIST",
         "Reference: BST-2104",
@@ -256,8 +400,67 @@ export async function seedDemoLoad(args: { officeId: string }): Promise<{ ok: tr
       aiFlags: JSON.stringify(["Net weight (18,000 kg) matches the invoice but gross (18,200 kg) is 200 kg above what the BL records — confirm with shipper before customs entry."]),
       aiKeyFields: JSON.stringify({ total_packages: 12, gross_weight_kg: 18200, net_weight_kg: 18000, dimensions: "120×80×60 cm avg", package_type: "Wooden crate" }),
     },
-    { name: "Certificate of Origin (pending)", docType: "COO", status: "PENDING", url: null, aiSummary: null, aiFlags: null, aiKeyFields: null },
-    { name: "Customs declaration (pending)",   docType: "CUSTOMS", status: "PENDING", url: null, aiSummary: null, aiFlags: null, aiKeyFields: null },
+    {
+      name: "COO_RO-2026-04781.pdf",
+      docType: "COO",
+      status: "APPROVED",
+      url: makeDemoPdfDataUrl("Certificate of Origin — RO-2026-04781", [
+        "CERTIFICATE OF ORIGIN",
+        "Certificate No: RO-2026-04781",
+        "Issuing authority: Romanian Chamber of Commerce, Constanta",
+        "Country of origin: ROMANIA",
+        "Exporter: Black Sea Trading Co · Constanta, RO",
+        "Consignee: Hamburg Cold Storage GmbH · Hamburg, DE",
+        "Goods: Cold-rolled steel coils, 18 MT",
+        "HS Code: 7209.16   Invoice ref: BST-2104",
+        "Container: MEDU2891744 (40HC)",
+        "Issued: 02 May 2026   Valid: 30 days",
+      ]),
+      aiSummary: "EUR.1 / Romanian Chamber of Commerce Certificate of Origin RO-2026-04781 confirming Romanian origin for the steel coils. Matches invoice BST-2104 and BL container MEDU2891744. HS code 7209.16.",
+      aiFlags: JSON.stringify([]),
+      aiKeyFields: JSON.stringify({
+        certificate_no: "RO-2026-04781",
+        country_of_origin: "Romania",
+        exporter: "Black Sea Trading Co",
+        consignee: "Hamburg Cold Storage GmbH",
+        hs_codes: ["7209.16"],
+        invoice_ref: "BST-2104",
+        issued: "2026-05-02",
+        validity_days: 30,
+      }),
+    },
+    {
+      name: "Customs_Declaration_DE-IM-2026-91102.pdf",
+      docType: "CUSTOMS",
+      status: "APPROVED",
+      url: makeDemoPdfDataUrl("Customs Declaration — DE/IM/2026/91102", [
+        "CUSTOMS DECLARATION (Import)",
+        "Declaration No: DE/IM/2026/91102",
+        "Filed by: Hamburg Customs Broker AG (broker code HB-2241)",
+        "Importer: Hamburg Cold Storage GmbH",
+        "Goods: Cold-rolled steel coils",
+        "HS Code: 7209.16",
+        "Customs value: USD 20,700",
+        "Duty rate: 0% (EUR.1 preference)",
+        "VAT: 19% on landed value (paid)",
+        "Container: MEDU2891744   Vessel: MSC ARIADNE / Voy 21W",
+        "Filed: 18 May 2026 (pre-arrival)",
+      ]),
+      aiSummary: "Pre-arrival customs declaration DE/IM/2026/91102 filed by Hamburg Customs Broker AG. Duty 0% under EUR.1 preference (matches the COO). VAT 19% paid on landed value of USD 20,700. Container/vessel match the BL.",
+      aiFlags: JSON.stringify([]),
+      aiKeyFields: JSON.stringify({
+        declaration_no: "DE/IM/2026/91102",
+        broker: "Hamburg Customs Broker AG",
+        importer: "Hamburg Cold Storage GmbH",
+        hs_code: "7209.16",
+        customs_value: 20700,
+        currency: "USD",
+        duty_rate: "0%",
+        vat_rate: "19%",
+        container: "MEDU2891744",
+        filed: "2026-05-18",
+      }),
+    },
   ];
   for (const d of docs) {
     await prisma.jobDocument.create({
