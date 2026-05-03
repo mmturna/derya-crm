@@ -113,6 +113,11 @@ ${typeBlock}`;
 }
 
 export async function chatWithAgent(history: ChatMsg[], userMessage: string, scopeJobId?: string): Promise<ChatResult> {
+  // No-op test: returns immediately without touching session, db, or AI.
+  // If this fails, the error is in the framework / deploy / client bundle, not my code.
+  if (userMessage.trim().toLowerCase() === "/ping") {
+    return { reply: `pong · history-len=${history.length} · scope=${scopeJobId ?? "none"} · build=${process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) ?? "local"}` };
+  }
   try {
     return await _chatWithAgentImpl(history, userMessage, scopeJobId);
   } catch (e) {
