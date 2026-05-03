@@ -11,7 +11,7 @@ import { awardSupplier, draftReplyToMessage, draftCounterOffer } from "./sourcin
 import { extractSourcingOffersForInquiry } from "./sourcing-offers";
 import { findStuckJobs } from "./stuck-jobs";
 import { seedDemoLoad } from "./seed-demo-load";
-import { analyzeJobDocument } from "./doc-analyze";
+import { analyzeJobDocument, askAboutDocument } from "./doc-analyze";
 import {
   applyEditJob, applyMoveStage, applyAddMilestone,
   applySetCustomer, applyRenameCompany, applyEditInquiry,
@@ -353,6 +353,18 @@ export const TOOLS = [
     name: "seed_demo_load",
     description: "Seeds one fully-populated example FORWARDING job for demos: customer 'Black Sea Trading Co', steel coils Constanta → Hamburg, 3 carrier rates, milestones, 3 docs (BL + Invoice + Packing List) with pre-baked AI analysis, portal token. Idempotent — returns the existing demo job if already seeded. Use when the operator says 'seed a demo load', 'create an example job', 'set up demo data'.",
     input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "ask_about_document",
+    description: "Answer a free-form question about a specific JobDocument by reading its PDF content (or cached AI summary if PDF text is unavailable). Use when the operator asks 'what's the BL number', 'when does the LC expire', 'is the consignee correct on the invoice', etc.",
+    input_schema: {
+      type: "object",
+      properties: {
+        document_id: { type: "string" },
+        question: { type: "string" },
+      },
+      required: ["document_id", "question"],
+    },
   },
   {
     name: "analyze_document",
@@ -904,6 +916,13 @@ export async function dispatchTool(
       }
       case "seed_demo_load": {
         const r = await seedDemoLoad({ officeId: ctx.officeId });
+        return "error" in r ? { ok: false, error: r.error } : { ok: true, result: r };
+      }
+      case "ask_about_document": {
+        const documentId = String(input.document_id ?? "");
+        const question = String(input.question ?? "");
+        if (!documentId || !question) return { ok: false, error: "document_id and question required" };
+        const r = await askAboutDocument({ documentId, question });
         return "error" in r ? { ok: false, error: r.error } : { ok: true, result: r };
       }
       case "analyze_document": {

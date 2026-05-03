@@ -4,6 +4,54 @@ import crypto from "crypto";
 import { revalidatePath } from "next/cache";
 import { prisma } from "./prisma";
 
+// Build a minimal one-page PDF with the given title and body lines, returned
+// as a data: URL. Used to seed demo documents that the inline viewer can
+// render and the PDF text extractor can read. Pure ASCII, no fonts embedded —
+// uses the standard Helvetica that every PDF reader has built in.
+function makeDemoPdfDataUrl(title: string, lines: string[]): string {
+  const escape = (s: string) => s.replace(/[\\()]/g, (c) => "\\" + c);
+  const safeTitle = escape(title);
+  const safeLines = lines.map(escape);
+
+  // Build the content stream. Position starts near the top of an A4 page.
+  let content = "BT\n/F1 16 Tf\n72 760 Td\n(" + safeTitle + ") Tj\nET\n";
+  let y = 720;
+  for (const ln of safeLines) {
+    content += `BT\n/F1 11 Tf\n72 ${y} Td\n(${ln}) Tj\nET\n`;
+    y -= 18;
+  }
+
+  const objs: string[] = [];
+  // 1: Catalog
+  objs.push("<< /Type /Catalog /Pages 2 0 R >>");
+  // 2: Pages
+  objs.push("<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+  // 3: Page
+  objs.push("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>");
+  // 4: Content stream
+  const contentLen = Buffer.byteLength(content, "latin1");
+  objs.push(`<< /Length ${contentLen} >>\nstream\n${content}endstream`);
+  // 5: Font
+  objs.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+
+  let pdf = "%PDF-1.4\n";
+  const offsets: number[] = [];
+  for (let i = 0; i < objs.length; i++) {
+    offsets.push(Buffer.byteLength(pdf, "latin1"));
+    pdf += `${i + 1} 0 obj\n${objs[i]}\nendobj\n`;
+  }
+  const xrefOffset = Buffer.byteLength(pdf, "latin1");
+  pdf += "xref\n0 " + (objs.length + 1) + "\n";
+  pdf += "0000000000 65535 f \n";
+  for (const off of offsets) {
+    pdf += String(off).padStart(10, "0") + " 00000 n \n";
+  }
+  pdf += `trailer << /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+
+  const b64 = Buffer.from(pdf, "latin1").toString("base64");
+  return `data:application/pdf;base64,${b64}`;
+}
+
 // Seed one fully-populated FORWARDING job for demo purposes:
 // - Customer (creates one named "Black Sea Trading Co" if missing)
 // - Inquiry with parsed shipment fields
@@ -134,7 +182,18 @@ export async function seedDemoLoad(args: { officeId: string }): Promise<{ ok: tr
       name: "BL_HAMB-2026-04781.pdf",
       docType: "BL",
       status: "APPROVED",
-      url: "data:application/pdf;base64,JVBERi0xLjQKJeLjz9MK", // placeholder header — analysis is pre-set
+      url: makeDemoPdfDataUrl("BL — HAMB-2026-04781", [
+        "BILL OF LADING (Master)",
+        "BL Number: HAMB-2026-04781",
+        "Vessel: MSC ARIADNE   Voyage: 21W",
+        "Container: MEDU2891744 (40HC)",
+        "Gross weight: 18,000 kg   Packages: 12 wooden crates",
+        "Shipper: Black Sea Trading Co (Constanta, RO)",
+        "Consignee: Hamburg Cold Storage GmbH (Hamburg, DE)",
+        "Port of loading: Constanta   Port of discharge: Hamburg",
+        "Vessel ETD: 09 May 2026   ETA: 20 May 2026",
+        "Freight: prepaid   Carrier: MSC",
+      ]),
       aiSummary: "Master Bill of Lading from MSC for the Constanta → Hamburg leg. Container MEDU2891744 listed, 40HC, 18,000 kg gross. Shipper Black Sea Trading Co, consignee Hamburg Cold Storage GmbH.",
       aiFlags: JSON.stringify(["Vessel ETD on BL (May 9) is one day later than the booked ETD — not blocking, but adjust customer comms if needed."]),
       aiKeyFields: JSON.stringify({ bl_number: "HAMB-2026-04781", vessel: "MSC ARIADNE", voyage: "21W", container_no: "MEDU2891744", gross_weight_kg: 18000, shipper: "Black Sea Trading Co", consignee: "Hamburg Cold Storage GmbH", port_of_loading: "Constanta", port_of_discharge: "Hamburg" }),
@@ -143,7 +202,17 @@ export async function seedDemoLoad(args: { officeId: string }): Promise<{ ok: tr
       name: "Commercial_Invoice_BST-2104.pdf",
       docType: "INVOICE",
       status: "APPROVED",
-      url: "data:application/pdf;base64,JVBERi0xLjQKJeLjz9MK",
+      url: makeDemoPdfDataUrl("Commercial Invoice — BST-2104", [
+        "COMMERCIAL INVOICE",
+        "Invoice No: BST-2104   Date: 01 May 2026",
+        "Seller: Black Sea Trading Co — Constanta, RO",
+        "Buyer:  Hamburg Cold Storage GmbH — Hamburg, DE",
+        "Item: Cold-rolled steel coils",
+        "Quantity: 18 MT × USD 1,150 / MT = USD 20,700",
+        "Currency: USD   Incoterms: FOB Constanta",
+        "Payment terms: 30% TT advance + 70% LC at sight",
+        "Buyer reference: HCS-PO-2026-91",
+      ]),
       aiSummary: "Commercial invoice #BST-2104 for steel coils, total 18 MT × $1,150/MT = $20,700. Buyer Hamburg Cold Storage GmbH. Payment terms 30% TT advance + 70% LC at sight.",
       aiFlags: JSON.stringify([]),
       aiKeyFields: JSON.stringify({ invoice_no: "BST-2104", invoice_date: "2026-05-01", currency: "USD", total: 20700, qty: 18, unit_price: 1150, payment_terms: "30% TT + 70% LC at sight", seller: "Black Sea Trading Co", buyer: "Hamburg Cold Storage GmbH" }),
@@ -152,7 +221,16 @@ export async function seedDemoLoad(args: { officeId: string }): Promise<{ ok: tr
       name: "Packing_List_BST-2104.pdf",
       docType: "PACKING_LIST",
       status: "UPLOADED",
-      url: "data:application/pdf;base64,JVBERi0xLjQKJeLjz9MK",
+      url: makeDemoPdfDataUrl("Packing List — BST-2104", [
+        "PACKING LIST",
+        "Reference: BST-2104",
+        "Total packages: 12 wooden crates",
+        "Gross weight: 18,200 kg",
+        "Net weight: 18,000 kg",
+        "Crate dimensions (avg): 120 × 80 × 60 cm",
+        "Marks & numbers: BST/HCS/2026/01-12",
+        "Container: MEDU2891744 (40HC)",
+      ]),
       aiSummary: "Packing list for invoice BST-2104. 12 wooden crates, gross 18,200 kg, net 18,000 kg. Crate dimensions averaging 120×80×60 cm.",
       aiFlags: JSON.stringify(["Net weight (18,000 kg) matches the invoice but gross (18,200 kg) is 200 kg above what the BL records — confirm with shipper before customs entry."]),
       aiKeyFields: JSON.stringify({ total_packages: 12, gross_weight_kg: 18200, net_weight_kg: 18000, dimensions: "120×80×60 cm avg", package_type: "Wooden crate" }),

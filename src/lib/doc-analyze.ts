@@ -139,6 +139,88 @@ Be conservative with flags — false alarms erode trust.`,
   return { ok: true, summary, flags, keyFields };
 }
 
+// Ask a free-form question about a JobDocument. Fetches the PDF text on the
+// fly (or reuses cached aiSummary + key fields if PDF text is unavailable)
+// and feeds the operator's question through Haiku for a grounded answer.
+export async function askAboutDocument(args: {
+  documentId: string;
+  question: string;
+}): Promise<{ ok: true; answer: string } | { error: string }> {
+  const session = await requireSession();
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { error: "ANTHROPIC_API_KEY is not set" };
+
+  const doc = await prisma.jobDocument.findFirst({
+    where: { id: args.documentId, officeId: session.officeId },
+    include: { job: { include: { inquiry: { select: { commodity: true } } } } },
+  });
+  if (!doc) return { error: "Document not found" };
+  if (!doc.url) return { error: "Document has no file yet" };
+
+  // Try to load full PDF text. If it fails (e.g. data: placeholder),
+  // fall back to the cached aiSummary + key_fields, which are already
+  // structured representations of the doc.
+  let pdfText = "";
+  try {
+    if (doc.url.startsWith("/api/gmail/attachment")) {
+      const u = new URL(doc.url, "http://localhost");
+      const messageDbId = u.searchParams.get("messageDbId");
+      const attachmentId = u.searchParams.get("attachmentId");
+      if (messageDbId && attachmentId) {
+        const msg = await prisma.emailMessage.findFirst({
+          where: { id: messageDbId, account: { officeId: session.officeId } },
+          select: { gmailMessageId: true, account: { select: { id: true, provider: true } } },
+        });
+        if (msg?.account?.provider === "GMAIL" && msg.gmailMessageId) {
+          const token = await getValidAccessToken(msg.account.id);
+          const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.gmailMessageId}/attachments/${attachmentId}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (res.ok) {
+            const j: { data?: string } = await res.json();
+            if (j.data) {
+              pdfText = await extractPdfText(Buffer.from(j.data.replace(/-/g, "+").replace(/_/g, "/"), "base64"));
+            }
+          }
+        }
+      }
+    } else if (doc.url.startsWith("data:")) {
+      const m = doc.url.match(/^data:[^;]+;base64,(.+)$/);
+      if (m) pdfText = await extractPdfText(Buffer.from(m[1], "base64"));
+    } else {
+      const res = await fetch(doc.url);
+      if (res.ok) pdfText = await extractPdfText(Buffer.from(await res.arrayBuffer()));
+    }
+  } catch { /* fall through to cached summary */ }
+
+  let context: string;
+  if (pdfText.trim().length > 200) {
+    context = `Full document text:\n\n${pdfText.slice(0, 14000)}`;
+  } else if (doc.aiSummary || doc.aiKeyFields) {
+    let keyFields: Record<string, unknown> = {};
+    try { keyFields = JSON.parse(doc.aiKeyFields ?? "{}"); } catch {}
+    context = `(PDF text unavailable — answering from cached AI summary + extracted fields.)\n\nSummary: ${doc.aiSummary ?? "—"}\n\nExtracted fields:\n${Object.entries(keyFields).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join("\n")}`;
+  } else {
+    return { error: "Couldn't read the document and no cached analysis exists. Approve the doc first to trigger analysis." };
+  }
+
+  const client = new Anthropic({ apiKey });
+  const result = await client.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 600,
+    system: `You answer the operator's question about a single freight document. Be concise (<120 words). Quote specific numbers/dates from the doc when relevant. If the answer isn't in the document, say so plainly — don't speculate. No emojis, no markdown headers.
+
+Doc type: ${doc.docType}. Filename: ${doc.name}. Job: ${doc.job?.reference ?? "?"} (${doc.job?.inquiry?.commodity ?? "—"}, ${doc.job?.origin ?? "?"} → ${doc.job?.destination ?? "?"}).`,
+    messages: [{
+      role: "user",
+      content: `${context}\n\n────\n\nOperator question: ${args.question}`,
+    }],
+  });
+
+  const text = result.content[0].type === "text" ? result.content[0].text : "";
+  return { ok: true, answer: text.trim() };
+}
+
 async function extractPdfText(buf: Buffer): Promise<string> {
   // Lazy import — pdf-parse pulls in node fs at import time which makes
   // unrelated server actions trip on cold start.
