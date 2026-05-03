@@ -6,6 +6,7 @@ import { requireSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { populateJobFromEmails } from "@/lib/job-populate";
 import { mergeAllOpenInquiriesIntoOne, consolidateDuplicateInquiries } from "@/lib/merge-actions";
+import { awardSupplier, draftReplyToMessage } from "@/lib/sourcing-award";
 
 export type ChatMsg = { role: "user" | "assistant"; content: string };
 
@@ -29,9 +30,27 @@ Your job:
     1. Consolidate / categorize / merge / group multiple RFQs into ONE procurement (or forwarding) job — when the user says things like "merge all into one", "consolidate the soybean and corn gluten under one procurement", "categorize everything under one job", "group these RFQs", you can do it. The system intercepts that intent and runs the merge automatically.
     2. Find and dedupe duplicate inquiries: "merge duplicates", "find duplicates".
     3. Populate a job's load details from its linked emails (when scoped to a job).
+    4. Award a supplier (when scoped to a SOURCING job): "award the cheapest", "go with ORLAZUL", "select the best offer". Picks the cheapest priced offer or the named supplier, advances the job to "Awarded", and drafts a confirmation email.
+    5. Draft a reply to the latest inbound message on a job: "draft a reply", "write a response", "compose an email back to them". Optionally pass intent like "counter at $480/MT" or "ask for sample".
   Never tell the user you "can't create / can't merge / it's a workflow they need to do manually" — these actions exist. If the request is ambiguous, run the action you think is closest and report what changed.`;
 
 const RFQ_KEYWORDS = /\b(FCL|LCL|RFQ|quote|shipment|container|ETD|ETA|freight|cargo|BL|TEU|shipping|Incoterms|EXW|FOB|DAP|DDP|forwarder|carrier|ocean|airfreight|trucking)\b/i;
+
+function detectAwardIntent(text: string): { matched: boolean; supplierHint?: string } {
+  const t = text.toLowerCase();
+  if (!/\b(award|select|pick|choose|go with|accept|confirm|move forward with)\b/.test(t)) return { matched: false };
+  if (!/\b(supplier|offer|cheapest|best|winner|deal)\b/.test(t)) return { matched: false };
+  // Try to capture supplier name after "with X" / "to X" / "X's offer"
+  const m = t.match(/(?:with|to|for|the)\s+([a-z][a-z0-9 .,&-]{2,40})\b/);
+  return { matched: true, supplierHint: m?.[1]?.trim() };
+}
+
+function detectDraftReplyIntent(text: string): boolean {
+  const t = text.toLowerCase();
+  if (!/\b(draft|write|compose|prepare)\b/.test(t)) return false;
+  if (!/\b(reply|response|email|answer|message)\b/.test(t)) return false;
+  return true;
+}
 
 function detectMergeIntent(text: string): { kind: "all-into-one" | "dedup" | "none"; type?: "SOURCING" | "FORWARDING" } {
   const t = text.toLowerCase();
@@ -228,6 +247,67 @@ export async function chatWithAgent(history: ChatMsg[], userMessage: string, sco
     if ("error" in r) return { reply: `Couldn't dedupe: ${r.error}` };
     if (r.merged === 0) return { reply: `No duplicates found across your open inquiries.` };
     return { reply: `Merged ${r.merged} duplicate inquiries into ${r.clusters} cleaned-up deal${r.clusters === 1 ? "" : "s"}.` };
+  }
+
+  // Branch 1.45: Award/draft-reply intents — only meaningful when focused on a job.
+  if (scopeJobId) {
+    const award = detectAwardIntent(userMessage);
+    if (award.matched) {
+      // Find the inquiry's threads, pick the cheapest priced offer (or matching
+      // supplier name if hint present), call awardSupplier.
+      const job = await prisma.job.findFirst({
+        where: { id: scopeJobId, officeId: session.officeId },
+        include: {
+          inquiry: { include: { emailThreads: true } },
+        },
+      });
+      if (!job?.inquiry) return { reply: "This job has no linked inquiry to award against." };
+      if (job.inquiry.type !== "SOURCING") return { reply: "Award action only applies to procurement (SOURCING) jobs." };
+
+      const candidates = job.inquiry.emailThreads
+        .map((t) => {
+          let offer: Record<string, unknown> = {};
+          try { if (t.supplierOffer) offer = JSON.parse(t.supplierOffer); } catch {}
+          return { id: t.id, subject: t.subject, offer };
+        });
+      let pick = null;
+      if (award.supplierHint) {
+        const hint = award.supplierHint.toLowerCase();
+        pick = candidates.find((c) =>
+          (typeof c.offer.supplierName === "string" && (c.offer.supplierName as string).toLowerCase().includes(hint)) ||
+          c.subject.toLowerCase().includes(hint)
+        );
+      }
+      if (!pick) {
+        // cheapest priced
+        pick = candidates
+          .filter((c) => typeof c.offer.pricePerUnit === "number")
+          .sort((a, b) => (a.offer.pricePerUnit as number) - (b.offer.pricePerUnit as number))[0];
+      }
+      if (!pick) return { reply: "I can't tell which supplier to award — no offer prices are extracted yet. Open the RFQ and click Award on the supplier you want." };
+
+      const r = await awardSupplier(pick.id);
+      if ("error" in r) return { reply: `Couldn't award: ${r.error}` };
+      const name = (pick.offer.supplierName as string) || pick.subject;
+      return {
+        reply: `Awarded the deal to ${name}. Job moved to "Awarded". A confirmation email is drafted — open the RFQ supplier table to copy + send it.\n\n--- Draft preview ---\n${r.emailDraft.slice(0, 600)}${r.emailDraft.length > 600 ? "…" : ""}`,
+      };
+    }
+
+    if (detectDraftReplyIntent(userMessage)) {
+      // Pick the most recent inbound thread on this job's inquiry.
+      const job = await prisma.job.findFirst({
+        where: { id: scopeJobId, officeId: session.officeId },
+        include: { inquiry: { include: { emailThreads: { orderBy: { lastMessageAt: "desc" }, take: 1 } } } },
+      });
+      const thread = job?.inquiry?.emailThreads?.[0];
+      if (!thread) return { reply: "No email threads on this job to reply to." };
+      const r = await draftReplyToMessage({ threadId: thread.id, intent: userMessage });
+      if ("error" in r) return { reply: `Couldn't draft: ${r.error}` };
+      return {
+        reply: `Drafted a reply${r.replyTo ? ` to ${r.replyTo}` : ""}:\n\n${r.draft}\n\nCopy from the inbox or RFQ page to send.`,
+      };
+    }
   }
 
   // Branch 1.5: When focused on a specific job, detect "populate / fill / extract

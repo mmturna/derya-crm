@@ -1,9 +1,10 @@
 "use client";
 
-import { useTransition } from "react";
+import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Icon } from "@/components/icon";
 import { extractSourcingOffersForInquiry } from "@/lib/sourcing-offers";
+import { awardSupplier, draftReplyToMessage } from "@/lib/sourcing-award";
 
 type Offer = {
   supplierName?: string | null;
@@ -26,17 +27,46 @@ type Row = {
   threadSubject: string;
   fromEmail: string | null;
   lastMessageAt: string;
+  awardedAt: string | null;
   offer: Offer | null;
 };
 
 export function SourcingOffersTable({ inquiryId, rows }: { inquiryId: string; rows: Row[] }) {
   const router = useRouter();
   const [busy, start] = useTransition();
+  const [awardModal, setAwardModal] = useState<{ threadId: string; supplierName: string; draft: string; replyTo: string | null } | null>(null);
+  const [replyModal, setReplyModal] = useState<{ threadId: string; supplierName: string; draft: string; replyTo: string | null } | null>(null);
 
   function refresh() {
     start(async () => {
       await extractSourcingOffersForInquiry(inquiryId);
       router.refresh();
+    });
+  }
+  function award(row: Row) {
+    if (!confirm(`Award the deal to ${row.offer?.supplierName ?? row.fromEmail ?? "this supplier"}? This sets the job to "Awarded" and drafts a confirmation email.`)) return;
+    start(async () => {
+      const r = await awardSupplier(row.threadId);
+      if ("error" in r) { alert(r.error); return; }
+      setAwardModal({
+        threadId: row.threadId,
+        supplierName: row.offer?.supplierName ?? row.fromEmail ?? "Supplier",
+        draft: r.emailDraft,
+        replyTo: row.fromEmail,
+      });
+      router.refresh();
+    });
+  }
+  function draftReply(row: Row, intent?: string) {
+    start(async () => {
+      const r = await draftReplyToMessage({ threadId: row.threadId, intent });
+      if ("error" in r) { alert(r.error); return; }
+      setReplyModal({
+        threadId: row.threadId,
+        supplierName: row.offer?.supplierName ?? row.fromEmail ?? "Supplier",
+        draft: r.draft,
+        replyTo: r.replyTo,
+      });
     });
   }
 
@@ -140,15 +170,104 @@ export function SourcingOffersTable({ inquiryId, rows }: { inquiryId: string; ro
                         o?.sampleAvailable === false ? <span style={{ color: "var(--text-3)" }}>no</span> : "—"}
                     </Td>
                     <Td>
-                      <a href={`/dashboard/inbox?thread=${r.threadId}`} style={{ fontSize: 11, color: "var(--brand)", textDecoration: "none" }}>
-                        Thread →
-                      </a>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
+                        {r.awardedAt ? (
+                          <span style={{
+                            fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 3,
+                            background: "var(--brand)", color: "#fff",
+                            textTransform: "uppercase", letterSpacing: "0.06em",
+                          }}>Awarded</span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => award(r)}
+                            disabled={busy}
+                            style={{
+                              fontSize: 10.5, fontWeight: 600, padding: "3px 8px", borderRadius: 3,
+                              background: "var(--brand)", color: "#fff", border: "none", cursor: "pointer",
+                            }}
+                          >Award</button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => draftReply(r)}
+                          disabled={busy}
+                          style={{
+                            fontSize: 10.5, padding: "2px 6px", borderRadius: 3,
+                            background: "transparent", color: "var(--brand)", border: "1px solid var(--brand-border)", cursor: "pointer",
+                          }}
+                        >AI reply</button>
+                      </div>
                     </Td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      {awardModal && (
+        <DraftModal
+          title={`Award confirmation — ${awardModal.supplierName}`}
+          subtitle={awardModal.replyTo ? `To: ${awardModal.replyTo}` : ""}
+          draft={awardModal.draft}
+          onClose={() => setAwardModal(null)}
+        />
+      )}
+      {replyModal && (
+        <DraftModal
+          title={`Reply draft — ${replyModal.supplierName}`}
+          subtitle={replyModal.replyTo ? `To: ${replyModal.replyTo}` : ""}
+          draft={replyModal.draft}
+          onClose={() => setReplyModal(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function DraftModal({ title, subtitle, draft, onClose }: { title: string; subtitle: string; draft: string; onClose: () => void }) {
+  const [text, setText] = useState(draft);
+  const [copied, setCopied] = useState(false);
+  function copy() {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)",
+        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
+      }}
+    >
+      <div onClick={(e) => e.stopPropagation()} style={{
+        background: "var(--surface)", borderRadius: 8,
+        width: "min(640px, 92vw)", maxHeight: "85vh",
+        boxShadow: "0 12px 40px rgba(0,0,0,0.25)",
+        display: "flex", flexDirection: "column",
+      }}>
+        <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)" }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{title}</div>
+          {subtitle && <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 2 }}>{subtitle}</div>}
+        </div>
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          style={{
+            flex: 1, minHeight: 280, padding: 16, border: "none", outline: "none",
+            fontSize: 13, lineHeight: 1.55, fontFamily: "inherit",
+            background: "var(--surface)", color: "var(--text)", resize: "vertical",
+          }}
+        />
+        <div style={{ padding: "12px 18px", borderTop: "1px solid var(--border)", display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button onClick={onClose} className="btn btn-secondary btn-sm" style={{ fontSize: 12 }}>Close</button>
+          <button onClick={copy} className="btn btn-sm" style={{ fontSize: 12 }}>
+            {copied ? "Copied" : "Copy to clipboard"}
+          </button>
         </div>
       </div>
     </div>

@@ -15,6 +15,17 @@ const STATUSES = [
   { key: "DELIVERED",  label: "Delivered"  },
 ] as const;
 
+// Same underlying statuses, but labels reframed for procurement (SOURCING).
+const PROCUREMENT_LABELS: Record<string, string> = {
+  PROPOSED:   "Proposed",
+  INQUIRY:    "Negotiating",
+  QUOTED:     "Award pending",
+  BOOKED:     "Awarded",
+  IN_TRANSIT: "Shipping",
+  CUSTOMS:    "In transit",
+  DELIVERED:  "Received",
+};
+
 type StatusKey = typeof STATUSES[number]["key"];
 
 export default async function JobsPage({
@@ -26,13 +37,22 @@ export default async function JobsPage({
   const { mode } = await searchParams;
   const focusedId = await getFocusedJobId();
 
+  const typeFilter =
+    mode === "procurement" ? "SOURCING" :
+    mode === "operations"  ? "FORWARDING" : null;
+
   const jobs = await prisma.job.findMany({
-    where: { officeId: session.officeId },
+    where: {
+      officeId: session.officeId,
+      ...(typeFilter ? { type: typeFilter } : {}),
+    },
     include: {
       company: { select: { id: true, name: true } },
     },
     orderBy: { createdAt: "desc" },
   });
+
+  const isProcurement = mode === "procurement";
 
   const byStatus: Record<StatusKey, typeof jobs> = {
     PROPOSED: [], INQUIRY: [], QUOTED: [], BOOKED: [], IN_TRANSIT: [], CUSTOMS: [], DELIVERED: [],
@@ -80,7 +100,7 @@ export default async function JobsPage({
       <div className="metric-strip" style={{ marginBottom: 16 }}>
         {STATUSES.filter((s) => s.key !== "DELIVERED").map((s) => (
           <div key={s.key} className="metric-item">
-            <div className="metric-label">{s.label}</div>
+            <div className="metric-label">{isProcurement ? (PROCUREMENT_LABELS[s.key] ?? s.label) : s.label}</div>
             <div className="metric-value">{byStatus[s.key].length}</div>
           </div>
         ))}
@@ -93,7 +113,7 @@ export default async function JobsPage({
           return (
             <div key={status.key} className="job-col">
               <div className="job-col-header">
-                <div className="job-col-title">{status.label}</div>
+                <div className="job-col-title">{isProcurement ? (PROCUREMENT_LABELS[status.key] ?? status.label) : status.label}</div>
                 <span className="job-col-count">{colJobs.length}</span>
               </div>
               <div className="job-col-body">

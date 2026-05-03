@@ -589,6 +589,7 @@ model EmailThread {
   autoLinkSkipReason String? // why AI decided not to auto-create an inquiry (e.g. "not freight related")
   supplierOffer    String?  // JSON {supplierName, pricePerUnit, currency, unit, qtyAvailable, incoterms, paymentTerms, leadTime, validity, sampleAvailable, notes}
   supplierOfferAt  DateTime? // when AI last extracted a supplier offer from this thread
+  awardedAt        DateTime? // operator marked this supplier as winner of the sourcing deal
   lastMessageAt    DateTime @default(now())
   messageCount     Int      @default(0)
   createdAt        DateTime @default(now())

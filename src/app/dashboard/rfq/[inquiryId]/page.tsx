@@ -156,6 +156,7 @@ export default async function RFQDetailPage({
                   threadSubject: t.subject,
                   fromEmail: firstInbound?.fromEmail ?? null,
                   lastMessageAt: t.lastMessageAt.toISOString(),
+                  awardedAt: t.awardedAt ? t.awardedAt.toISOString() : null,
                   offer: offer as never,
                 };
               })}
