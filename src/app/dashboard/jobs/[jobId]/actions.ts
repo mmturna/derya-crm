@@ -125,6 +125,11 @@ export async function updateDocStatus(docId: string, status: string) {
     where: { id: docId },
     data: { status, url: status === "UPLOADED" ? (doc.url ?? "#placeholder") : doc.url },
   });
+  // On approve, run AI analysis (best-effort; don't block UI on failure).
+  if (status === "APPROVED" && doc.url && !doc.url.includes("placeholder")) {
+    const { analyzeJobDocument } = await import("@/lib/doc-analyze");
+    analyzeJobDocument({ documentId: docId }).catch(() => {});
+  }
   revalidatePath(`/dashboard/jobs/${doc.jobId}`);
 }
 

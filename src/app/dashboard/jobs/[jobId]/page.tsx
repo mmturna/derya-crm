@@ -1,3 +1,4 @@
+import React from "react";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { requireSession } from "@/lib/auth";
@@ -529,37 +530,82 @@ export default async function JobDetailPage({
               </span>
             </div>
             <div style={{ padding: "8px 18px 14px" }}>
-              {docs.map((d) => (
-                <div key={d.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0", borderBottom: "1px solid var(--border)" }}>
-                  <div style={{
-                    width: 24, height: 24, borderRadius: 4, flexShrink: 0,
-                    background: d.status === "APPROVED" ? "var(--brand)" : d.status === "UPLOADED" ? "var(--surface-3)" : "var(--surface-3)",
-                    border: `1px solid ${d.status === "APPROVED" ? "var(--brand)" : "var(--border)"}`,
-                    color: d.status === "APPROVED" ? "#fff" : "var(--text-3)",
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                  }}>
-                    {d.status === "APPROVED" ? <Icon name="check" size={13} strokeWidth={2.5} />
-                      : d.status === "UPLOADED" ? <Icon name="chevron-up" size={12} strokeWidth={2.5} />
-                      : <Icon name="circle" size={9} strokeWidth={1.5} />}
+              {docs.map((d) => {
+                let flags: string[] = [];
+                let keyFields: Record<string, unknown> = {};
+                if (d.aiFlags) { try { const x = JSON.parse(d.aiFlags); if (Array.isArray(x)) flags = x.filter((y) => typeof y === "string"); } catch {} }
+                if (d.aiKeyFields) { try { const x = JSON.parse(d.aiKeyFields); if (x && typeof x === "object") keyFields = x; } catch {} }
+                return (
+                <div key={d.id} style={{ padding: "10px 0", borderBottom: "1px solid var(--border)" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{
+                      width: 24, height: 24, borderRadius: 4, flexShrink: 0,
+                      background: d.status === "APPROVED" ? "var(--brand)" : "var(--surface-3)",
+                      border: `1px solid ${d.status === "APPROVED" ? "var(--brand)" : "var(--border)"}`,
+                      color: d.status === "APPROVED" ? "#fff" : "var(--text-3)",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}>
+                      {d.status === "APPROVED" ? <Icon name="check" size={13} strokeWidth={2.5} />
+                        : d.status === "UPLOADED" ? <Icon name="chevron-up" size={12} strokeWidth={2.5} />
+                        : <Icon name="circle" size={9} strokeWidth={1.5} />}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 500 }}>{d.name}</div>
+                      <div style={{ fontSize: 10.5, color: "var(--text-3)" }}>
+                        {DOC_TYPE_LABEL[d.docType] ?? d.docType} · {d.status.toLowerCase()}
+                        {d.aiAnalyzedAt && <span style={{ marginLeft: 6, color: "var(--brand)" }}>· AI commented</span>}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 4 }}>
+                      {d.status === "PENDING" && (
+                        <form action={updateDocStatus.bind(null, d.id, "UPLOADED")}>
+                          <button type="submit" className="btn btn-secondary btn-sm" style={{ fontSize: 11 }}>Mark uploaded</button>
+                        </form>
+                      )}
+                      {d.status === "UPLOADED" && (
+                        <form action={updateDocStatus.bind(null, d.id, "APPROVED")}>
+                          <button type="submit" className="btn btn-sm" style={{ fontSize: 11 }}>Approve</button>
+                        </form>
+                      )}
+                    </div>
                   </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12.5, fontWeight: 500 }}>{d.name}</div>
-                    <div style={{ fontSize: 10.5, color: "var(--text-3)" }}>{DOC_TYPE_LABEL[d.docType] ?? d.docType} · {d.status.toLowerCase()}</div>
-                  </div>
-                  <div style={{ display: "flex", gap: 4 }}>
-                    {d.status === "PENDING" && (
-                      <form action={updateDocStatus.bind(null, d.id, "UPLOADED")}>
-                        <button type="submit" className="btn btn-secondary btn-sm" style={{ fontSize: 11 }}>Mark uploaded</button>
-                      </form>
-                    )}
-                    {d.status === "UPLOADED" && (
-                      <form action={updateDocStatus.bind(null, d.id, "APPROVED")}>
-                        <button type="submit" className="btn btn-sm" style={{ fontSize: 11 }}>Approve</button>
-                      </form>
-                    )}
-                  </div>
+                  {(d.aiSummary || flags.length > 0) && (
+                    <div style={{ marginTop: 6, marginLeft: 34, padding: "8px 10px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 4 }}>
+                      {d.aiSummary && (
+                        <div style={{ fontSize: 11.5, color: "var(--text-2)", lineHeight: 1.5 }}>
+                          <span style={{ fontWeight: 700, color: "var(--brand)", textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 9.5, marginRight: 6 }}>AI</span>
+                          {d.aiSummary}
+                        </div>
+                      )}
+                      {flags.length > 0 && (
+                        <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 3 }}>
+                          {flags.map((f, i) => (
+                            <div key={i} style={{ fontSize: 11, color: "var(--danger)", display: "flex", gap: 6 }}>
+                              <Icon name="alert" size={11} /><span>{f}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {Object.keys(keyFields).length > 0 && (
+                        <details style={{ marginTop: 6 }}>
+                          <summary style={{ fontSize: 10.5, color: "var(--text-3)", cursor: "pointer", letterSpacing: "0.04em", textTransform: "uppercase" }}>
+                            Extracted fields ({Object.keys(keyFields).length})
+                          </summary>
+                          <div style={{ marginTop: 4, display: "grid", gridTemplateColumns: "max-content 1fr", gap: "2px 10px", fontSize: 11 }}>
+                            {Object.entries(keyFields).map(([k, v]) => (
+                              <React.Fragment key={k}>
+                                <span style={{ color: "var(--text-3)" }}>{k}</span>
+                                <span style={{ color: "var(--text)" }}>{Array.isArray(v) ? v.join(", ") : String(v)}</span>
+                              </React.Fragment>
+                            ))}
+                          </div>
+                        </details>
+                      )}
+                    </div>
+                  )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           </div>
 

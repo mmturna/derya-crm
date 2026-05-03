@@ -537,6 +537,11 @@ model JobDocument {
   docType          String   // BL / INVOICE / PACKING_LIST / COO / CUSTOMS / BOOKING / OTHER
   status           String   @default("PENDING") // PENDING / UPLOADED / APPROVED
   uploadedByUserId String?
+  // AI-generated analysis after the doc is uploaded/approved
+  aiSummary        String?  // 1-3 sentence synopsis of the document content
+  aiFlags          String?  // JSON array of strings: red flags / discrepancies AI noticed
+  aiKeyFields      String?  // JSON object with extracted key fields (BL number, weight, container#, etc)
+  aiAnalyzedAt     DateTime?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 

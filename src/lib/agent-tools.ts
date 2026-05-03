@@ -10,6 +10,8 @@ import { populateJobFromEmails } from "./job-populate";
 import { awardSupplier, draftReplyToMessage, draftCounterOffer } from "./sourcing-award";
 import { extractSourcingOffersForInquiry } from "./sourcing-offers";
 import { findStuckJobs } from "./stuck-jobs";
+import { seedDemoLoad } from "./seed-demo-load";
+import { analyzeJobDocument } from "./doc-analyze";
 import {
   applyEditJob, applyMoveStage, applyAddMilestone,
   applySetCustomer, applyRenameCompany, applyEditInquiry,
@@ -345,6 +347,23 @@ export const TOOLS = [
         only_unlinked: { type: "boolean", description: "Default true — skip threads already linked elsewhere" },
         limit: { type: "number", description: "Max threads to link, default 50" },
       },
+    },
+  },
+  {
+    name: "seed_demo_load",
+    description: "Seeds one fully-populated example FORWARDING job for demos: customer 'Black Sea Trading Co', steel coils Constanta → Hamburg, 3 carrier rates, milestones, 3 docs (BL + Invoice + Packing List) with pre-baked AI analysis, portal token. Idempotent — returns the existing demo job if already seeded. Use when the operator says 'seed a demo load', 'create an example job', 'set up demo data'.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "analyze_document",
+    description: "Re-run AI analysis on a JobDocument: fetches the PDF, extracts text, generates a 1-3 sentence summary + flags any discrepancies + extracts key fields (BL number, weights, dates). Use when operator approves a doc or asks 'what does this BL say' / 'are there issues with this invoice'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        document_id: { type: "string" },
+        force: { type: "boolean", description: "Re-analyze even if already done recently" },
+      },
+      required: ["document_id"],
     },
   },
   {
@@ -882,6 +901,16 @@ export async function dispatchTool(
             note: job.type === "SOURCING" ? "Supplier offers re-extracted." : undefined,
           },
         };
+      }
+      case "seed_demo_load": {
+        const r = await seedDemoLoad({ officeId: ctx.officeId });
+        return "error" in r ? { ok: false, error: r.error } : { ok: true, result: r };
+      }
+      case "analyze_document": {
+        const documentId = String(input.document_id ?? "");
+        if (!documentId) return { ok: false, error: "document_id required" };
+        const r = await analyzeJobDocument({ documentId, force: input.force === true });
+        return "error" in r ? { ok: false, error: r.error } : { ok: true, result: r };
       }
       case "delete_job": {
         if (!jobId) return { ok: false, error: "No job_id" };
