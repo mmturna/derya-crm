@@ -18,6 +18,14 @@ type ExtractedAction =
   | { action: "edit-job"; fields: Record<string, unknown> }
   | { action: "move-stage"; status: string }
   | { action: "add-milestone"; type: string; plannedAt?: string; actualAt?: string; note?: string }
+  | { action: "set-customer"; companyName: string; createIfMissing?: boolean }
+  | { action: "rename-company"; newName: string }
+  | { action: "edit-inquiry"; fields: Record<string, unknown> }
+  | { action: "set-quote-line"; description: string; amount: number; currency?: string }
+  | { action: "set-revenue"; amount: number; currency?: string }
+  | { action: "set-cost"; amount: number; currency?: string }
+  | { action: "delete-job"; confirm: boolean }
+  | { action: "split-supplier"; supplierHint: string }
   | { action: "none" };
 
 const VALID_STATUSES = ["PROPOSED", "INQUIRY", "QUOTED", "BOOKED", "IN_TRANSIT", "CUSTOMS", "DELIVERED", "CANCELLED"] as const;
@@ -35,12 +43,13 @@ export async function extractActionFromMessage(args: {
   const client = new Anthropic({ apiKey });
   const result = await client.messages.create({
     model: "claude-haiku-4-5-20251001",
-    max_tokens: 350,
-    system: `You parse a single chat message into ONE structured action against the focused freight job. Output ONLY JSON.
+    max_tokens: 450,
+    system: `You parse a single chat message into ONE structured action against the focused freight job. Output ONLY JSON, no preamble.
 
 Action options:
+
 1. Update Job fields:
-   { "action": "edit-job", "fields": { "origin"?: string, "destination"?: string, "mode"?: "SEA-FCL"|"SEA-LCL"|"AIR"|"ROAD"|"COURIER", "incoterms"?: string, "commodity"?: string, "weight"?: number, "volume"?: number, "packages"?: number, "etd"?: "YYYY-MM-DD", "eta"?: "YYYY-MM-DD", "revenue"?: number, "cost"?: number, "currency"?: "USD"|"EUR"|"GBP"|"TRY", "notes"?: string } }
+   { "action": "edit-job", "fields": { "origin"?: string, "destination"?: string, "mode"?: "SEA-FCL"|"SEA-LCL"|"AIR"|"ROAD"|"COURIER", "incoterms"?: string, "commodity"?: string, "weight"?: number, "volume"?: number, "packages"?: number, "etd"?: "YYYY-MM-DD", "eta"?: "YYYY-MM-DD", "currency"?: "USD"|"EUR"|"GBP"|"TRY", "notes"?: string } }
 
 2. Move job to a new stage:
    { "action": "move-stage", "status": "PROPOSED" | "INQUIRY" | "QUOTED" | "BOOKED" | "IN_TRANSIT" | "CUSTOMS" | "DELIVERED" | "CANCELLED" }
@@ -48,18 +57,39 @@ Action options:
 3. Add or update a milestone:
    { "action": "add-milestone", "type": "BOOKING"|"CARGO_READY"|"ETD"|"ETA"|"CUSTOMS_ENTRY"|"CUSTOMS_RELEASE"|"DELIVERY", "plannedAt"?: "YYYY-MM-DD", "actualAt"?: "YYYY-MM-DD", "note"?: string }
 
-4. Nothing applicable (the message is a question, ambiguous, or already handled elsewhere):
-   { "action": "none" }
+4. Set or change the CUSTOMER linked to this job. Triggers: "the customer is X", "set customer to X", "link to X", "this is for X", "add customer X". If the company doesn't exist yet, set createIfMissing true.
+   { "action": "set-customer", "companyName": string, "createIfMissing": true }
+
+5. Rename the customer / company on this job. Triggers: "rename customer to X", "rename the customer X", "change customer name to X", "the customer's name is X" (when a customer is already linked).
+   { "action": "rename-company", "newName": string }
+
+6. Update fields on the linked Inquiry (origin, destination, mode, incoterms, commodity, weight, volume, fromEmail, fromCompany, subject). Use this when the user is talking about the RFQ/source email rather than the job itself.
+   { "action": "edit-inquiry", "fields": { ... } }
+
+7. Set the customer-facing revenue (price quoted to customer) on the job:
+   { "action": "set-revenue", "amount": number, "currency"?: "USD"|"EUR"|"GBP"|"TRY" }
+
+8. Set the cost (carrier/supplier expense) on the job:
+   { "action": "set-cost", "amount": number, "currency"?: "USD"|"EUR"|"GBP"|"TRY" }
+
+9. Add a line item to the customer quote (description + amount):
+   { "action": "set-quote-line", "description": string, "amount": number, "currency"?: "USD"|"EUR"|"GBP"|"TRY" }
+
+10. Delete this job entirely. Only fire this when the user EXPLICITLY says "delete this job", "remove this job", "kill this job". Set confirm=true.
+    { "action": "delete-job", "confirm": true }
+
+11. None of the above:
+    { "action": "none" }
 
 Rules:
-- Only emit edit-job when there is a CLEAR field assignment ("set ETD May 20", "weight is 18 tons", "the supplier is HONEY", "incoterms CIF").
-- Only emit move-stage when the user clearly wants to advance/change the job's lifecycle stage. For SOURCING jobs, "awarded" → BOOKED, "negotiating" → INQUIRY, "received" → DELIVERED.
-- "log/mark/note that X happened today" → add-milestone with actualAt set to today's ISO date.
-- "ETA confirmed for May 22" or "BL issued today" are milestones (ETA, BOOKING).
+- Only emit one action. Pick the most specific.
+- Only fire delete-job for explicit "delete/remove/kill". Never for "discard" alone unless paired with "this job".
 - Convert relative dates (today, tomorrow, next week, May 20) to absolute YYYY-MM-DD.
-- Convert MT → kg (×1000) for weight.
-- For SOURCING type, "supplier" mentions go into notes, NOT origin (origin is the supplier's port/country).
-- If unsure or message is conversational, return { "action": "none" }.
+- Convert MT/tons → kg (×1000).
+- "Rename customer to X" → rename-company (we have a customer; change its name). "Set customer to X" / "the customer is X" / "this is for X" → set-customer (link/create).
+- Currency: USD/EUR/GBP/TRY only.
+- For SOURCING type, "supplier" mentions go into notes, not origin (origin = supplier port already extracted). For FORWARDING, "supplier"/"shipper" maps to origin entity but don't auto-create a Company for it.
+- If unsure, return { "action": "none" }.
 
 Job context:
 - type: ${args.scopeType}
@@ -88,6 +118,27 @@ Job context:
       actualAt: typeof parsed.actualAt === "string" ? parsed.actualAt : undefined,
       note: typeof parsed.note === "string" ? parsed.note : undefined,
     };
+  }
+  if (parsed.action === "set-customer" && typeof parsed.companyName === "string" && parsed.companyName.trim()) {
+    return { action: "set-customer", companyName: parsed.companyName.trim().slice(0, 200), createIfMissing: parsed.createIfMissing !== false };
+  }
+  if (parsed.action === "rename-company" && typeof parsed.newName === "string" && parsed.newName.trim()) {
+    return { action: "rename-company", newName: parsed.newName.trim().slice(0, 200) };
+  }
+  if (parsed.action === "edit-inquiry" && parsed.fields && typeof parsed.fields === "object") {
+    return { action: "edit-inquiry", fields: parsed.fields };
+  }
+  if (parsed.action === "set-revenue" && typeof parsed.amount === "number") {
+    return { action: "set-revenue", amount: parsed.amount, currency: typeof parsed.currency === "string" ? parsed.currency : undefined };
+  }
+  if (parsed.action === "set-cost" && typeof parsed.amount === "number") {
+    return { action: "set-cost", amount: parsed.amount, currency: typeof parsed.currency === "string" ? parsed.currency : undefined };
+  }
+  if (parsed.action === "set-quote-line" && typeof parsed.description === "string" && typeof parsed.amount === "number") {
+    return { action: "set-quote-line", description: parsed.description.slice(0, 300), amount: parsed.amount, currency: typeof parsed.currency === "string" ? parsed.currency : undefined };
+  }
+  if (parsed.action === "delete-job" && parsed.confirm === true) {
+    return { action: "delete-job", confirm: true };
   }
   return { action: "none" };
 }
@@ -156,6 +207,120 @@ export async function applyMoveStage(jobId: string, officeId: string, status: st
   revalidatePath(`/dashboard/jobs/${jobId}`);
   revalidatePath("/dashboard/jobs");
   return { ok: true, from: job.status, to: status };
+}
+
+export async function applySetCustomer(jobId: string, officeId: string, args: { companyName: string; createIfMissing?: boolean }): Promise<{ ok: true; created: boolean; companyName: string } | { error: string }> {
+  const job = await prisma.job.findFirst({ where: { id: jobId, officeId }, select: { id: true, inquiryId: true } });
+  if (!job) return { error: "Job not found" };
+  // Try to find an existing company in this office (case-insensitive).
+  let company = await prisma.company.findFirst({
+    where: { officeId, name: { equals: args.companyName, mode: "insensitive" } },
+    select: { id: true, name: true },
+  });
+  let created = false;
+  if (!company) {
+    if (args.createIfMissing === false) return { error: `No customer named "${args.companyName}" in this office` };
+    try {
+      company = await prisma.company.create({
+        data: { officeId, name: args.companyName },
+        select: { id: true, name: true },
+      });
+      created = true;
+    } catch {
+      // unique violation race — re-fetch
+      company = await prisma.company.findFirst({
+        where: { officeId, name: args.companyName },
+        select: { id: true, name: true },
+      });
+      if (!company) return { error: "Couldn't create or find that company" };
+    }
+  }
+  await prisma.job.update({ where: { id: jobId }, data: { companyId: company.id } });
+  if (job.inquiryId) {
+    await prisma.inquiry.update({ where: { id: job.inquiryId }, data: { companyId: company.id } });
+  }
+  revalidatePath(`/dashboard/jobs/${jobId}`);
+  revalidatePath("/dashboard/jobs");
+  revalidatePath("/dashboard/customers");
+  return { ok: true, created, companyName: company.name };
+}
+
+export async function applyRenameCompany(jobId: string, officeId: string, newName: string): Promise<{ ok: true; from: string; to: string } | { error: string }> {
+  const job = await prisma.job.findFirst({
+    where: { id: jobId, officeId },
+    select: { id: true, company: { select: { id: true, name: true } } },
+  });
+  if (!job) return { error: "Job not found" };
+  if (!job.company) return { error: "This job has no customer linked yet — set one first" };
+  const from = job.company.name;
+  // Avoid duplicate-name collision
+  const existing = await prisma.company.findFirst({
+    where: { officeId, name: { equals: newName, mode: "insensitive" }, NOT: { id: job.company.id } },
+    select: { id: true },
+  });
+  if (existing) return { error: `Another customer named "${newName}" already exists` };
+  await prisma.company.update({ where: { id: job.company.id }, data: { name: newName } });
+  revalidatePath(`/dashboard/jobs/${jobId}`);
+  revalidatePath("/dashboard/customers");
+  return { ok: true, from, to: newName };
+}
+
+export async function applyEditInquiry(jobId: string, officeId: string, fields: Record<string, unknown>): Promise<{ ok: true; applied: string[] } | { error: string }> {
+  const job = await prisma.job.findFirst({ where: { id: jobId, officeId }, select: { inquiryId: true } });
+  if (!job?.inquiryId) return { error: "Job has no linked inquiry" };
+  const update: Record<string, unknown> = {};
+  const applied: string[] = [];
+  const set = (k: string, v: unknown, t: "string" | "number") => {
+    if (v == null || v === "") return;
+    if (t === "number") { const n = Number(v); if (!isNaN(n)) { update[k] = n; applied.push(`${k}=${n}`); } }
+    else { update[k] = String(v); applied.push(`${k}=${String(v)}`); }
+  };
+  set("origin", fields.origin, "string");
+  set("destination", fields.destination, "string");
+  set("mode", fields.mode, "string");
+  set("incoterms", fields.incoterms, "string");
+  set("commodity", fields.commodity, "string");
+  set("subject", fields.subject, "string");
+  set("fromEmail", fields.fromEmail, "string");
+  set("fromCompany", fields.fromCompany, "string");
+  set("weight", fields.weight, "number");
+  set("volume", fields.volume, "number");
+  if (Object.keys(update).length === 0) return { error: "No recognized fields to update" };
+  await prisma.inquiry.update({ where: { id: job.inquiryId }, data: update });
+  revalidatePath(`/dashboard/rfq/${job.inquiryId}`);
+  revalidatePath(`/dashboard/jobs/${jobId}`);
+  return { ok: true, applied };
+}
+
+export async function applySetMoney(jobId: string, officeId: string, kind: "revenue" | "cost", amount: number, currency?: string): Promise<{ ok: true; kind: string; amount: number } | { error: string }> {
+  const job = await prisma.job.findFirst({ where: { id: jobId, officeId }, select: { id: true } });
+  if (!job) return { error: "Job not found" };
+  const data: Record<string, unknown> = { [kind]: amount };
+  if (currency && ["USD", "EUR", "GBP", "TRY"].includes(currency)) data.currency = currency;
+  await prisma.job.update({ where: { id: jobId }, data });
+  revalidatePath(`/dashboard/jobs/${jobId}`);
+  revalidatePath("/dashboard/jobs");
+  return { ok: true, kind, amount };
+}
+
+export async function applyAddQuoteLine(jobId: string, officeId: string, args: { description: string; amount: number; currency?: string }): Promise<{ ok: true } | { error: string }> {
+  const job = await prisma.job.findFirst({ where: { id: jobId, officeId }, select: { id: true, notes: true, currency: true } });
+  if (!job) return { error: "Job not found" };
+  const cur = args.currency ?? job.currency ?? "USD";
+  // Quote lines are stored pipe-delimited inside Job.notes per project context.
+  const line = `${args.description}|${args.amount}|${cur}`;
+  const newNotes = job.notes ? `${job.notes}\n${line}` : line;
+  await prisma.job.update({ where: { id: jobId }, data: { notes: newNotes } });
+  revalidatePath(`/dashboard/jobs/${jobId}`);
+  return { ok: true };
+}
+
+export async function applyDeleteJob(jobId: string, officeId: string): Promise<{ ok: true; reference: string } | { error: string }> {
+  const job = await prisma.job.findFirst({ where: { id: jobId, officeId }, select: { id: true, reference: true } });
+  if (!job) return { error: "Job not found" };
+  await prisma.job.delete({ where: { id: jobId } });
+  revalidatePath("/dashboard/jobs");
+  return { ok: true, reference: job.reference };
 }
 
 export async function applyAddMilestone(jobId: string, officeId: string, args: { type: string; plannedAt?: string; actualAt?: string; note?: string }): Promise<{ ok: true; type: string } | { error: string }> {

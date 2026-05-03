@@ -7,7 +7,12 @@ import { prisma } from "@/lib/prisma";
 import { populateJobFromEmails } from "@/lib/job-populate";
 import { mergeAllOpenInquiriesIntoOne, consolidateDuplicateInquiries } from "@/lib/merge-actions";
 import { awardSupplier, draftReplyToMessage } from "@/lib/sourcing-award";
-import { extractActionFromMessage, applyEditJob, applyMoveStage, applyAddMilestone } from "@/lib/agent-actions";
+import {
+  extractActionFromMessage,
+  applyEditJob, applyMoveStage, applyAddMilestone,
+  applySetCustomer, applyRenameCompany, applyEditInquiry,
+  applySetMoney, applyAddQuoteLine, applyDeleteJob,
+} from "@/lib/agent-actions";
 import { findStuckJobs } from "@/lib/stuck-jobs";
 import { classifyAgentIntent } from "@/lib/agent-intent";
 
@@ -38,11 +43,19 @@ Your job:
     5. Draft a reply to the latest inbound message on a job: "draft a reply", "write a response", "compose an email back to them". Optionally pass intent like "counter at $480/MT" or "ask for sample".
     6. List threads awaiting a reply: "what needs reply", "what's pending", "who's waiting on me".
     7. Hide unrelated threads in bulk: "hide unrelated", "mark spam as unrelated", "dismiss the noise".
-    8. Edit a job's fields directly (when scoped to a job): "set ETD to May 20", "weight is 18 tons", "incoterms CIF", "the supplier is HONEY OTOMOTIV". Multi-field updates work in one message.
+    8. Edit a job's fields directly (when scoped to a job): "set ETD to May 20", "weight is 18 tons", "incoterms CIF". Multi-field updates work in one message.
     9. Move a job to a new stage: "mark this booked", "this is in transit now", "move to customs", "we received it".
-    10. Log a milestone: "log that BL was issued today", "ETA confirmed for May 22", "cargo ready next Tuesday". Type and date are extracted from the message.
-    11. Show stuck/stale jobs: "what's stuck", "stale jobs", "what needs attention". Returns up to 8 jobs that haven't moved in 5+ days, each with an AI-suggested next action.
-    12. Morning briefing / daily digest: "morning briefing", "what's on my plate", "state of the pipeline" — aggregated snapshot of pending replies, stuck jobs, unawarded sourcing, proposed-stage jobs.
+    10. Log a milestone: "log that BL was issued today", "ETA confirmed for May 22", "cargo ready next Tuesday".
+    11. Show stuck/stale jobs: "what's stuck", "stale jobs", "what needs attention".
+    12. Morning briefing / daily digest: "morning briefing", "what's on my plate", "state of the pipeline".
+    13. Set/link a customer: "the customer is ABC Corp", "set customer to ABC Corp", "this is for ABC Corp" — links existing or creates a new Company.
+    14. Rename the linked customer: "rename customer to ABC Corp", "change customer name to Acme" — renames the underlying Company record.
+    15. Edit the linked Inquiry / RFQ separately from the Job: "set RFQ subject to X", "the sender's email is foo@bar.com on the RFQ".
+    16. Set revenue (price quoted to customer): "revenue is $12,500", "we charge €10k for this".
+    17. Set cost (carrier/supplier expense): "cost is $8,200".
+    18. Add a quote line: "add a line: customs clearance, $200".
+    19. Delete this job: only when the user EXPLICITLY says "delete this job" / "remove this job" / "kill this job".
+  These actions execute server-side. The reply you see is the actual result.
   Never tell the user you "can't create / can't merge / it's a workflow they need to do manually" — these actions exist. If the request is ambiguous, run the action you think is closest and report what changed.`;
 
 const RFQ_KEYWORDS = /\b(FCL|LCL|RFQ|quote|shipment|container|ETD|ETA|freight|cargo|BL|TEU|shipping|Incoterms|EXW|FOB|DAP|DDP|forwarder|carrier|ocean|airfreight|trucking)\b/i;
@@ -448,6 +461,43 @@ export async function chatWithAgent(history: ChatMsg[], userMessage: string, sco
         if ("error" in r) return { reply: `Couldn't log milestone: ${r.error}` };
         const when = extracted.actualAt ? `confirmed ${extracted.actualAt}` : extracted.plannedAt ? `planned ${extracted.plannedAt}` : "logged";
         return { reply: `Logged ${extracted.type.replace(/_/g, " ").toLowerCase()} milestone — ${when}.` };
+      }
+      if (extracted.action === "set-customer") {
+        const r = await applySetCustomer(scopeJobId, session.officeId, extracted);
+        if ("error" in r) return { reply: `Couldn't set customer: ${r.error}` };
+        return { reply: r.created
+          ? `Created customer "${r.companyName}" and linked it to ${job.reference}.`
+          : `Linked existing customer "${r.companyName}" to ${job.reference}.` };
+      }
+      if (extracted.action === "rename-company") {
+        const r = await applyRenameCompany(scopeJobId, session.officeId, extracted.newName);
+        if ("error" in r) return { reply: `Couldn't rename: ${r.error}` };
+        return { reply: `Renamed customer "${r.from}" → "${r.to}". Change is reflected on every job linked to this customer.` };
+      }
+      if (extracted.action === "edit-inquiry") {
+        const r = await applyEditInquiry(scopeJobId, session.officeId, extracted.fields);
+        if ("error" in r) return { reply: `Couldn't update inquiry: ${r.error}` };
+        return { reply: `Updated the linked inquiry: ${r.applied.join(", ")}.` };
+      }
+      if (extracted.action === "set-revenue") {
+        const r = await applySetMoney(scopeJobId, session.officeId, "revenue", extracted.amount, extracted.currency);
+        if ("error" in r) return { reply: `Couldn't set revenue: ${r.error}` };
+        return { reply: `Set revenue to ${(extracted.currency ?? "USD")} ${extracted.amount.toLocaleString()} on ${job.reference}.` };
+      }
+      if (extracted.action === "set-cost") {
+        const r = await applySetMoney(scopeJobId, session.officeId, "cost", extracted.amount, extracted.currency);
+        if ("error" in r) return { reply: `Couldn't set cost: ${r.error}` };
+        return { reply: `Set cost to ${(extracted.currency ?? "USD")} ${extracted.amount.toLocaleString()} on ${job.reference}.` };
+      }
+      if (extracted.action === "set-quote-line") {
+        const r = await applyAddQuoteLine(scopeJobId, session.officeId, extracted);
+        if ("error" in r) return { reply: `Couldn't add line: ${r.error}` };
+        return { reply: `Added line "${extracted.description}" — ${(extracted.currency ?? "USD")} ${extracted.amount.toLocaleString()} to ${job.reference}'s quote.` };
+      }
+      if (extracted.action === "delete-job") {
+        const r = await applyDeleteJob(scopeJobId, session.officeId);
+        if ("error" in r) return { reply: `Couldn't delete: ${r.error}` };
+        return { reply: `Deleted ${r.reference}. The kanban board now reflects this.` };
       }
     }
   }
