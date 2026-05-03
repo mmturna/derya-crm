@@ -130,6 +130,24 @@ async function _chatWithAgentImpl(history: ChatMsg[], userMessage: string, scope
     return { reply: "Agent unavailable — ANTHROPIC_API_KEY is not configured." };
   }
 
+  // Diagnostic: "/debug" reports schema and env state without invoking AI.
+  if (userMessage.trim().toLowerCase() === "/debug") {
+    const checks: string[] = [];
+    try {
+      const t = await prisma.emailThread.findFirst({ select: { id: true, supplierOffer: true, awardedAt: true, hiddenAt: true, snoozedUntil: true, externalThreadId: true } });
+      checks.push(`emailThread fields readable: ${t ? "yes (1 row)" : "no rows yet but query succeeded"}`);
+    } catch (e) { checks.push(`emailThread fields FAIL: ${e instanceof Error ? e.message.slice(0, 200) : String(e)}`); }
+    try {
+      const j = await prisma.job.findFirst({ select: { id: true, parentJobId: true, portalToken: true, notifyCustomer: true, customerEmail: true } });
+      checks.push(`job fields readable: ${j ? "yes" : "no rows"}`);
+    } catch (e) { checks.push(`job fields FAIL: ${e instanceof Error ? e.message.slice(0, 200) : String(e)}`); }
+    try {
+      const m = await prisma.emailMessage.findFirst({ select: { id: true, gmailMessageId: true } });
+      checks.push(`emailMessage gmailMessageId: ${m ? "yes" : "no rows"}`);
+    } catch (e) { checks.push(`emailMessage FAIL: ${e instanceof Error ? e.message.slice(0, 200) : String(e)}`); }
+    return { reply: `Debug:\n· officeId: ${session.officeId}\n· scopeJobId: ${scopeJobId ?? "none"}\n· ANTHROPIC_API_KEY: ${apiKey ? "set" : "MISSING"}\n· ${checks.join("\n· ")}` };
+  }
+
   // Branch 1: pasted RFQ → ingest as Inquiry (kept as a special case because
   // tool-use isn't the right shape for "the message itself is the data").
   if (looksLikeRFQ(userMessage)) {
