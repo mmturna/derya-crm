@@ -18,6 +18,17 @@ const SYSTEM = `You are the in-app agent for Derya Freight OS — a freight forw
 
 You have a set of tools (see the tools list). USE THEM. Do not describe what you would do — call the tool and report the actual result.
 
+**TOOL ROUTING SHORTCUTS (memorize these):**
+- "suppliers" / "offers" / "prices" / "shortlist" / "cheapest" / "best" / "compare" → call **summarize_supplier_offers** (auto-resolves to focused job or the most recent open SOURCING job). NEVER call search_email_threads first for these — the dedicated tool already aggregates and ranks supplier offers.
+- "rates" / "carrier prices" on a forwarding job → **summarize_carrier_rates**.
+- "what's stuck" / "stale" → **list_stuck_jobs**.
+- "who's waiting on me" / "needs reply" → **list_threads_awaiting_reply**.
+- "morning briefing" / "what's on my plate" → **morning_briefing**.
+- "find emails about X" / "search for Y" → **search_email_threads**.
+- "tell me about JOB-X" / "what's the status of X" → **get_job**.
+
+Pick the most specific tool. ONE tool call answers most questions — don't chain unnecessary searches.
+
 When the user asks a question:
 - If the answer requires looking up data you don't already have (jobs, inquiries, threads, customers, supplier offers, carrier rates, milestones, etc.) — **call the right search/lookup tool first**, then answer.
 - Don't say "I don't see X in my view" — search for it. There are search_jobs, search_inquiries, search_companies, search_email_threads, get_job, list_open_inquiries, list_threads_awaiting_reply, list_stuck_jobs, summarize_supplier_offers, summarize_carrier_rates.
@@ -254,8 +265,12 @@ async function _chatWithAgentImpl(history: ChatMsg[], userMessage: string, scope
     i === arr.length - 1 ? { ...t, cache_control: { type: "ephemeral" } } : t
   );
 
-  const MAX_TOOL_TURNS = 4;
-  let lastTextReply = "";
+  // 6 tool rounds is enough for most multi-hop queries. Track whether the
+  // last text we saw was a final answer (post-tool) or just a preamble
+  // ("Let me search..."), so we don't accidentally return preamble.
+  const MAX_TOOL_TURNS = 6;
+  let finalText = "";  // text from a non-tool-use response
+  let preambleText = ""; // text from a tool-use response (intermediate)
   try {
     for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
       const response = await client.messages.create({
@@ -267,11 +282,15 @@ async function _chatWithAgentImpl(history: ChatMsg[], userMessage: string, scope
       });
 
       const textBlocks = response.content.filter((b: any) => b.type === "text") as any[];
-      if (textBlocks.length) lastTextReply = textBlocks.map((b) => b.text).join("\n").trim();
+      const text = textBlocks.length ? textBlocks.map((b) => b.text).join("\n").trim() : "";
 
       if (response.stop_reason !== "tool_use") {
-        return { reply: lastTextReply || "(no reply)" };
+        // Final answer.
+        return { reply: text || finalText || preambleText || "(no reply)" };
       }
+
+      // Mid-flight: text is preamble. Keep latest preamble in case we cap out.
+      if (text) preambleText = text;
 
       messages.push({ role: "assistant", content: response.content });
 
@@ -290,8 +309,19 @@ async function _chatWithAgentImpl(history: ChatMsg[], userMessage: string, scope
         };
       }));
       messages.push({ role: "user", content: toolResults });
+
+      // After the LAST permitted tool round, force the model to produce a
+      // final textual answer instead of more tool calls.
+      if (turn === MAX_TOOL_TURNS - 2) {
+        messages.push({
+          role: "user",
+          content: "You have one more turn. Stop calling tools — produce the final answer for the operator now using the data you've gathered.",
+        });
+      }
     }
-    return { reply: lastTextReply || "Reached tool-call limit without a final answer. Try a more specific request." };
+    // Capped out without a non-tool-use response. Return whatever text we
+    // last saw mid-flight rather than dropping to a generic error.
+    return { reply: preambleText || finalText || "I gathered some data but couldn't reach a final answer in time. Try rephrasing more narrowly." };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[agent-chat] tool-use loop failed:", msg, e);
