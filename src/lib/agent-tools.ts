@@ -607,9 +607,21 @@ export async function dispatchTool(
         };
       }
       case "summarize_supplier_offers": {
-        if (!jobId) return { ok: false, error: "No job in scope" };
+        // If no job in scope, find the most recent open SOURCING job in this
+        // office automatically — operator usually means "the current
+        // procurement deal" without typing the JOB-ref.
+        let resolvedJobId = jobId;
+        if (!resolvedJobId) {
+          const fallback = await prisma.job.findFirst({
+            where: { officeId: ctx.officeId, type: "SOURCING", status: { notIn: ["DELIVERED", "CANCELLED"] } },
+            select: { id: true },
+            orderBy: { updatedAt: "desc" },
+          });
+          if (!fallback) return { ok: false, error: "No procurement (SOURCING) jobs in this office." };
+          resolvedJobId = fallback.id;
+        }
         const job = await prisma.job.findFirst({
-          where: { id: jobId, officeId: ctx.officeId },
+          where: { id: resolvedJobId, officeId: ctx.officeId },
           include: {
             inquiry: { include: { emailThreads: { include: { messages: { orderBy: { sentAt: "desc" }, take: 1 } } } } },
           },
