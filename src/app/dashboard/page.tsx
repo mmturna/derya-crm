@@ -639,7 +639,7 @@ function StageWorkbench({
         <InquiryStage job={job} carrierQuotes={carrierQuotes} receivedQuotes={receivedQuotes} laneRates={laneRates} />
       )}
       {status === "QUOTED" && (
-        <QuotedStage job={job} quoteLines={quoteLines} laneRates={laneRates} />
+        <QuotedStage job={job} quoteLines={quoteLines} laneRates={laneRates} carrierQuotes={carrierQuotes} />
       )}
       {(status === "BOOKED" || status === "CUSTOMS") && (
         <DocumentsStage job={job} docs={docs} />
@@ -773,56 +773,167 @@ function InquiryStage({ job, carrierQuotes, receivedQuotes, laneRates }: { job: 
   );
 }
 
-function QuotedStage({ job, quoteLines, laneRates }: { job: any; quoteLines: { desc: string; amount: number; cur: string }[]; laneRates: any[] }) {
+function QuotedStage({ job, quoteLines, laneRates, carrierQuotes }: {
+  job: any;
+  quoteLines: { desc: string; amount: number; cur: string }[];
+  laneRates: any[];
+  carrierQuotes: any[];
+}) {
   const total = quoteLines.reduce((s, l) => s + l.amount, 0);
+
+  // Aggregate carrier rates the same way the Lane Prices page does it.
+  const received = carrierQuotes.filter((q: any) => q.status === "RECEIVED");
+  const pending  = carrierQuotes.filter((q: any) => q.status !== "RECEIVED");
+  const ranked = [...received].sort((a: any, b: any) => {
+    const ap = a.total40HC ?? a.total40 ?? a.total20 ?? Infinity;
+    const bp = b.total40HC ?? b.total40 ?? b.total20 ?? Infinity;
+    return ap - bp;
+  });
+  const recommended = ranked[0] ?? null;
+  const initials = (name: string) => {
+    const w = name.trim().split(/\s+/);
+    return w.length >= 2 ? (w[0][0] + w[w.length - 1][0]).toUpperCase() : name.slice(0, 2).toUpperCase();
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {laneRates.length > 0 && <LaneRatesPanel laneRates={laneRates} />}
-    <div className="card">
-      <div className="worktable-section-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span>Quote — {job.reference}</span>
-        <div style={{ display: "flex", gap: 6 }}>
-          <a href={`/api/jobs/${job.id}/quote-pdf`} target="_blank" className="btn btn-secondary btn-sm" style={{ fontSize: 11.5, textDecoration: "none" }}>
-            Preview PDF
-          </a>
-          <button className="btn btn-sm" type="button" disabled style={{ fontSize: 11.5 }} title="Coming soon">Send to customer</button>
+      {/* Carrier rate aggregation table (same shape as the Lane Prices page) */}
+      <div className="card" style={{ overflow: "hidden" }}>
+        <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700 }}>Carrier rates received</div>
+            <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 2 }}>
+              Aggregated quotes for this load. Cheapest 40HC flagged. Click Use this rate to seed the customer-facing quote.
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <span style={{ fontSize: 10.5, fontWeight: 600, padding: "3px 9px", borderRadius: 12, background: "var(--surface-2)", border: "1px solid var(--border)", color: "var(--text-3)" }}>Pending: {pending.length}</span>
+            <span style={{ fontSize: 10.5, fontWeight: 600, padding: "3px 9px", borderRadius: 12, background: "var(--brand-light)", color: "var(--brand)", border: "1px solid var(--brand-border)" }}>Received: {received.length}</span>
+          </div>
         </div>
-      </div>
-      <div style={{ padding: 16 }}>
-        {quoteLines.length === 0 ? (
-          <div style={{ fontSize: 12.5, color: "var(--text-3)", marginBottom: 14 }}>
-            No line items yet. Add them below.
+        {received.length === 0 ? (
+          <div style={{ padding: 24, fontSize: 12.5, color: "var(--text-3)", textAlign: "center" }}>
+            No carrier rate replies on this load yet.
           </div>
         ) : (
-          <table style={{ marginBottom: 14 }}>
-            <thead><tr><th>Description</th><th style={{ textAlign: "right" }}>Amount</th><th>Cur</th></tr></thead>
-            <tbody>
-              {quoteLines.map((l, i) => (
-                <tr key={i}>
-                  <td>{l.desc}</td>
-                  <td style={{ textAlign: "right", fontWeight: 600 }}>{l.amount.toLocaleString()}</td>
-                  <td style={{ color: "var(--text-3)" }}>{l.cur}</td>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+              <thead>
+                <tr style={{ background: "var(--surface-2)", color: "var(--text-3)", textAlign: "left" }}>
+                  <th style={qThStyle}>Carrier</th>
+                  <th style={qThStyle}>Service</th>
+                  <th style={{ ...qThStyle, textAlign: "right" }}>20DRY</th>
+                  <th style={{ ...qThStyle, textAlign: "right" }}>40DRY</th>
+                  <th style={{ ...qThStyle, textAlign: "right" }}>40HC</th>
+                  <th style={{ ...qThStyle, textAlign: "center" }}>Transit</th>
+                  <th style={qThStyle}>Validity</th>
+                  <th style={qThStyle}> </th>
                 </tr>
-              ))}
-              <tr style={{ background: "var(--surface-2)" }}>
-                <td style={{ fontWeight: 700 }}>Total</td>
-                <td style={{ textAlign: "right", fontWeight: 800 }}>{total.toLocaleString()}</td>
-                <td style={{ color: "var(--text-3)" }}>{quoteLines[0]?.cur ?? "USD"}</td>
-              </tr>
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {ranked.map((q: any) => {
+                  const isRec = recommended?.id === q.id;
+                  const seedDescription = `Ocean Freight — ${q.carrier}${q.service ? ` (${q.service})` : ""}`;
+                  const seedAmount = q.total40HC ?? q.total40 ?? q.total20 ?? 0;
+                  return (
+                    <tr key={q.id} style={{
+                      borderTop: "1px solid var(--border)",
+                      background: isRec ? "var(--brand-light)" : "transparent",
+                      borderLeft: isRec ? "3px solid var(--brand)" : "3px solid transparent",
+                    }}>
+                      <td style={qTdStyle}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <div style={{ width: 28, height: 28, borderRadius: "50%", background: "var(--surface-3)", color: "var(--text-2)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10.5, fontWeight: 700, flexShrink: 0 }}>
+                            {initials(q.carrier)}
+                          </div>
+                          <div>
+                            <div style={{ fontWeight: 600 }}>{q.carrier}</div>
+                            {isRec && <div style={{ fontSize: 10, color: "var(--brand)", fontWeight: 700, marginTop: 1 }}>● BEST 40HC</div>}
+                          </div>
+                        </div>
+                      </td>
+                      <td style={{ ...qTdStyle, color: "var(--text-3)" }}>{q.service ?? "—"}</td>
+                      <td style={{ ...qTdStyle, textAlign: "right", fontFamily: "ui-monospace, Menlo, monospace", fontWeight: 600 }}>{q.total20 ? `$${q.total20.toLocaleString()}` : "—"}</td>
+                      <td style={{ ...qTdStyle, textAlign: "right", fontFamily: "ui-monospace, Menlo, monospace", fontWeight: 600 }}>{q.total40 ? `$${q.total40.toLocaleString()}` : "—"}</td>
+                      <td style={{ ...qTdStyle, textAlign: "right", fontFamily: "ui-monospace, Menlo, monospace", fontWeight: 700, color: isRec ? "var(--brand)" : "var(--text)" }}>{q.total40HC ? `$${q.total40HC.toLocaleString()}` : "—"}</td>
+                      <td style={{ ...qTdStyle, textAlign: "center", color: "var(--text-3)" }}>{q.transitDays ? `${q.transitDays}d` : "—"}</td>
+                      <td style={{ ...qTdStyle, color: "var(--text-3)" }}>{q.validity ?? "—"}</td>
+                      <td style={qTdStyle}>
+                        <form action={addQuoteLine.bind(null, job.id)}>
+                          <input type="hidden" name="description" value={seedDescription} />
+                          <input type="hidden" name="amount" value={seedAmount} />
+                          <input type="hidden" name="currency" value="USD" />
+                          <button type="submit" className="btn btn-secondary btn-sm" style={{ fontSize: 10.5, whiteSpace: "nowrap" }}>
+                            Use this rate
+                          </button>
+                        </form>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
-        <form action={addQuoteLine.bind(null, job.id)} style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr auto", gap: 8 }}>
-          <input name="description" placeholder="Description (e.g. Ocean Freight)" required />
-          <input name="amount" type="number" placeholder="Amount" required />
-          <select name="currency" defaultValue="USD"><option>USD</option><option>EUR</option><option>TRY</option><option>GBP</option></select>
-          <button className="btn btn-secondary btn-sm" type="submit" style={{ fontSize: 12 }}>Add line</button>
-        </form>
       </div>
-    </div>
+
+      {laneRates.length > 0 && <LaneRatesPanel laneRates={laneRates} />}
+
+      {/* Customer-facing quote builder */}
+      <div className="card">
+        <div className="worktable-section-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <span>Customer quote — {job.reference}</span>
+          <div style={{ display: "flex", gap: 6 }}>
+            <a href={`/api/jobs/${job.id}/quote-pdf`} target="_blank" className="btn btn-secondary btn-sm" style={{ fontSize: 11.5, textDecoration: "none" }}>
+              Preview PDF
+            </a>
+            <button className="btn btn-sm" type="button" disabled style={{ fontSize: 11.5 }} title="Coming soon">Send to customer</button>
+          </div>
+        </div>
+        <div style={{ padding: 16 }}>
+          {quoteLines.length === 0 ? (
+            <div style={{ fontSize: 12.5, color: "var(--text-3)", marginBottom: 14 }}>
+              No line items yet. Click <strong>Use this rate</strong> on a carrier above, or add a line manually below.
+            </div>
+          ) : (
+            <table style={{ marginBottom: 14, width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ background: "var(--surface-2)", color: "var(--text-3)", textAlign: "left" }}>
+                  <th style={qThStyle}>Description</th>
+                  <th style={{ ...qThStyle, textAlign: "right" }}>Amount</th>
+                  <th style={qThStyle}>Cur</th>
+                </tr>
+              </thead>
+              <tbody>
+                {quoteLines.map((l, i) => (
+                  <tr key={i} style={{ borderTop: "1px solid var(--border)" }}>
+                    <td style={qTdStyle}>{l.desc}</td>
+                    <td style={{ ...qTdStyle, textAlign: "right", fontWeight: 600 }}>{l.amount.toLocaleString()}</td>
+                    <td style={{ ...qTdStyle, color: "var(--text-3)" }}>{l.cur}</td>
+                  </tr>
+                ))}
+                <tr style={{ background: "var(--surface-2)", borderTop: "1px solid var(--border-strong)" }}>
+                  <td style={{ ...qTdStyle, fontWeight: 700 }}>Total</td>
+                  <td style={{ ...qTdStyle, textAlign: "right", fontWeight: 800 }}>{total.toLocaleString()}</td>
+                  <td style={{ ...qTdStyle, color: "var(--text-3)" }}>{quoteLines[0]?.cur ?? "USD"}</td>
+                </tr>
+              </tbody>
+            </table>
+          )}
+          <form action={addQuoteLine.bind(null, job.id)} style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr auto", gap: 8 }}>
+            <input name="description" placeholder="Description (e.g. Documentation, customs clearance)" required />
+            <input name="amount" type="number" placeholder="Amount" required />
+            <select name="currency" defaultValue="USD"><option>USD</option><option>EUR</option><option>TRY</option><option>GBP</option></select>
+            <button className="btn btn-secondary btn-sm" type="submit" style={{ fontSize: 12 }}>Add line</button>
+          </form>
+        </div>
+      </div>
     </div>
   );
 }
+
+const qThStyle: React.CSSProperties = { padding: "10px 14px", fontWeight: 600, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" };
+const qTdStyle: React.CSSProperties = { padding: "12px 14px", verticalAlign: "middle" };
 
 function LaneRatesPanel({ laneRates }: { laneRates: any[] }) {
   return (
