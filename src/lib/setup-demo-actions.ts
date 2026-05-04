@@ -37,11 +37,19 @@ export async function fullDemoCleanup(): Promise<{
   });
   if ("error" in soybean) return { error: `Soybean consolidate failed: ${soybean.error}` };
 
-  // Step 2: Find every DEMO job (notes contain [DEMO_LOAD_SEED]). Keep the
-  // most-progressed one (status order: PROPOSED < INQUIRY < QUOTED < BOOKED <
-  // IN_TRANSIT < CUSTOMS < DELIVERED). Delete the rest.
+  // Step 2: Find every DEMO job. We can't rely on the [DEMO_LOAD_SEED]
+  // marker alone — earlier partial runs created demos without it. Broader
+  // detection: notes contain the marker, OR the linked Company name starts
+  // with "DEMO ·", OR the linked Inquiry subject starts with "DEMO ·".
   const demos = await prisma.job.findMany({
-    where: { officeId, notes: { contains: "[DEMO_LOAD_SEED]" } },
+    where: {
+      officeId,
+      OR: [
+        { notes: { contains: "[DEMO_LOAD_SEED]" } },
+        { company: { name: { startsWith: "DEMO ·" } } },
+        { inquiry: { subject: { startsWith: "DEMO ·" } } },
+      ],
+    },
     select: { id: true, reference: true, status: true, inquiryId: true },
   });
   const STATUS_ORDER = ["PROPOSED", "INQUIRY", "QUOTED", "BOOKED", "IN_TRANSIT", "CUSTOMS", "DELIVERED"];
