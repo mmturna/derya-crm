@@ -218,27 +218,44 @@ async function _chatWithAgentImpl(history: ChatMsg[], userMessage: string, scope
 
   // Branch 2: tool-use loop. The AI sees the snapshot + scoped-job context,
   // sees every tool with its schema, and decides what to call.
-  const ctx = await buildOpsContext(session.officeId);
-  const scopedCtx = scopeJobId ? await buildScopedJobContext(scopeJobId, session.officeId) : "";
+  // ── PERF ──
+  // - buildOpsContext / buildScopedJobContext are cached for 20s per
+  //   officeId/jobId in module scope. Eliminates the Prisma roundtrip on the
+  //   hot path for follow-up messages.
+  // - System prompt + tools are wrapped with `cache_control: ephemeral` so
+  //   Anthropic prompt caching kicks in. The system block (~3-4k tokens) +
+  //   tool schemas (~5k tokens) are ~free on the second message in a session.
+  // - Tool calls within a single assistant turn dispatch in parallel.
+  // - MAX_TOOL_TURNS dropped 8 → 4. Most lookups need 1-2.
+  const [ctx, scopedCtx] = await Promise.all([
+    cachedOpsContext(session.officeId),
+    scopeJobId ? cachedScopedJobContext(scopeJobId, session.officeId) : Promise.resolve(""),
+  ]);
 
   const client = new Anthropic({ apiKey });
-  // Anthropic SDK message type is loose enough to accept raw blocks; using `any`
-  // here keeps TS happy without type gymnastics.
   const messages: any[] = [
     ...history.map((m) => ({ role: m.role, content: m.content })),
     { role: "user", content: userMessage },
   ];
 
-  // Allow up to 8 sequential tool calls per turn (lookup → mutation → confirm).
-  const MAX_TOOL_TURNS = 8;
+  // Use Anthropic prompt caching: the system prompt + tools array become a
+  // cached prefix. Cache is reused for ~5 min from first miss.
+  const systemBlocks: any[] = [
+    { type: "text", text: SYSTEM + "\n\n" + ctx + scopedCtx, cache_control: { type: "ephemeral" } },
+  ];
+  const toolsWithCache = ([...TOOLS] as any[]).map((t, i, arr) =>
+    i === arr.length - 1 ? { ...t, cache_control: { type: "ephemeral" } } : t
+  );
+
+  const MAX_TOOL_TURNS = 4;
   let lastTextReply = "";
   try {
     for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
       const response = await client.messages.create({
         model: "claude-haiku-4-5-20251001",
         max_tokens: 1024,
-        system: SYSTEM + "\n\n" + ctx + scopedCtx,
-        tools: TOOLS as any,
+        system: systemBlocks as any,
+        tools: toolsWithCache as any,
         messages,
       });
 
@@ -251,20 +268,20 @@ async function _chatWithAgentImpl(history: ChatMsg[], userMessage: string, scope
 
       messages.push({ role: "assistant", content: response.content });
 
+      // Run all requested tools in parallel.
       const toolUseBlocks = response.content.filter((b: any) => b.type === "tool_use") as any[];
-      const toolResults: any[] = [];
-      for (const tu of toolUseBlocks) {
+      const toolResults = await Promise.all(toolUseBlocks.map(async (tu) => {
         const r = await dispatchTool(tu.name, (tu.input ?? {}) as Record<string, unknown>, {
           officeId: session.officeId,
           scopeJobId,
         });
-        toolResults.push({
+        return {
           type: "tool_result",
           tool_use_id: tu.id,
           content: JSON.stringify(r),
           is_error: !r.ok,
-        });
-      }
+        };
+      }));
       messages.push({ role: "user", content: toolResults });
     }
     return { reply: lastTextReply || "Reached tool-call limit without a final answer. Try a more specific request." };
@@ -273,4 +290,29 @@ async function _chatWithAgentImpl(history: ChatMsg[], userMessage: string, scope
     console.error("[agent-chat] tool-use loop failed:", msg, e);
     return { reply: `Agent error — ${msg.slice(0, 400)}` };
   }
+}
+
+// ── In-memory caches for ops + scoped context (per office / per job).
+// 20-second TTL keeps a chat session warm without surfacing stale state when
+// the operator pauses to think for a few minutes. Module-scope so it survives
+// across requests on the same Vercel function instance.
+const OPS_CTX_CACHE = new Map<string, { value: string; at: number }>();
+const SCOPED_CTX_CACHE = new Map<string, { value: string; at: number }>();
+const CTX_TTL_MS = 20_000;
+
+async function cachedOpsContext(officeId: string): Promise<string> {
+  const c = OPS_CTX_CACHE.get(officeId);
+  if (c && Date.now() - c.at < CTX_TTL_MS) return c.value;
+  const value = await buildOpsContext(officeId);
+  OPS_CTX_CACHE.set(officeId, { value, at: Date.now() });
+  return value;
+}
+
+async function cachedScopedJobContext(jobId: string, officeId: string): Promise<string> {
+  const key = `${officeId}::${jobId}`;
+  const c = SCOPED_CTX_CACHE.get(key);
+  if (c && Date.now() - c.at < CTX_TTL_MS) return c.value;
+  const value = await buildScopedJobContext(jobId, officeId);
+  SCOPED_CTX_CACHE.set(key, { value, at: Date.now() });
+  return value;
 }
