@@ -102,7 +102,14 @@ async function _DashboardPageImpl(stageOverride: string | null) {
     where: { id: jobId, officeId: session.officeId },
     include: {
       company: { select: { id: true, name: true } },
-      inquiry: { include: { carrierQuotes: { orderBy: { createdAt: "asc" } } } },
+      inquiry: {
+        include: {
+          carrierQuotes: { orderBy: { createdAt: "asc" } },
+          // Inquiry-linked threads — these are the supplier replies attached
+          // when the inquiry was the only attachment point.
+          emailThreads: { include: { messages: { orderBy: { sentAt: "asc" } } } },
+        },
+      },
       documents: { orderBy: { createdAt: "asc" } },
       milestones: { orderBy: { createdAt: "asc" } },
       emailThreads: { include: { messages: { orderBy: { sentAt: "asc" } } } },
@@ -112,6 +119,18 @@ async function _DashboardPageImpl(stageOverride: string | null) {
   if (!job) {
     return <div style={{ padding: 24 }}>Job not found.</div>;
   }
+
+  // Combine Job-linked + Inquiry-linked threads, dedup by id, sort by lastMessageAt desc.
+  const inquiryThreads = job.inquiry?.emailThreads ?? [];
+  const seen = new Set<string>();
+  const combinedThreads = [...job.emailThreads, ...inquiryThreads].filter((t) => {
+    if (seen.has(t.id)) return false;
+    seen.add(t.id);
+    return true;
+  }).sort((a, b) => new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime());
+  // Inject combined view back onto job.emailThreads so downstream code that
+  // consumes job.emailThreads sees the full set.
+  (job as { emailThreads: typeof combinedThreads }).emailThreads = combinedThreads;
 
   await Promise.all([
     initJobDocuments(jobId, session.officeId),
