@@ -12,6 +12,7 @@ import { extractSourcingOffersForInquiry } from "./sourcing-offers";
 import { findStuckJobs } from "./stuck-jobs";
 import { seedDemoLoad } from "./seed-demo-load";
 import { analyzeJobDocument, askAboutDocument } from "./doc-analyze";
+import { prewarmInquirySummary } from "./prewarm-summary";
 import {
   applyEditJob, applyMoveStage, applyAddMilestone,
   applySetCustomer, applyRenameCompany, applyEditInquiry,
@@ -954,7 +955,7 @@ export async function dispatchTool(
           data: { inquiryId: job.inquiryId, autoLinkedAt: new Date() },
         });
         if (job.type === "SOURCING") {
-          try { await extractSourcingOffersForInquiry(job.inquiryId); } catch {}
+          await prewarmInquirySummary(job.inquiryId).catch(() => {});
         }
         revalidatePath("/dashboard/inbox");
         revalidatePath(`/dashboard/jobs/${jobId}`);

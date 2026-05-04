@@ -6,6 +6,7 @@ import { requireSession } from "./auth";
 import { mergeAllOpenInquiriesIntoOne } from "./merge-actions";
 import { ensureProposedJobsForOpenInquiries, confirmProposedJob } from "./job-actions";
 import { extractSourcingOffersForInquiry } from "./sourcing-offers";
+import { prewarmInquirySummary } from "./prewarm-summary";
 import { seedDemoLoad } from "./seed-demo-load";
 
 // Consolidate every open SOURCING-type inquiry in this office into ONE
@@ -174,7 +175,8 @@ export async function consolidateAshgabatSoybeanLoad(opts: {
   }
 
   // Re-extract supplier offers so the comparison table is populated.
-  try { await extractSourcingOffersForInquiry(keeperInquiryId); } catch {}
+  // Run extraction + prewarm summary cache so the agent's first read is fast.
+  await prewarmInquirySummary(keeperInquiryId).catch(() => {});
 
   // Apply operator-specified customer if requested. Creates a Company by name
   // (case-insensitive) and links it to both the inquiry and the job.

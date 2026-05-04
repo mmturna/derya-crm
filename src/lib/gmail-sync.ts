@@ -8,6 +8,7 @@ import { classifyInboundEmail } from "./email-classifier";
 import { autoCreateInquiryFromThread } from "./thread-actions";
 import { ensureProposedJobsForOpenInquiries } from "./job-actions";
 import { classifyEmailAttachments } from "./doc-classify";
+import { prewarmAllOpenInquiries } from "./prewarm-summary";
 
 // Sync envelope: how many threads max we'll touch in one run, and how far back
 // to look. Each thread is one Gmail API call regardless of how many messages
@@ -304,6 +305,11 @@ async function _syncEmailAccountInternal({ accountId, officeId }: { accountId: s
 
   // Backfill PROPOSED jobs for any open inquiry that doesn't have one yet.
   await ensureProposedJobsForOpenInquiries(account.officeId);
+
+  // Pre-warm supplier-offer summaries for every open SOURCING inquiry, fire-
+  // and-forget. The cron and the manual sync both kick this off so the
+  // agent's first query gets a hot cache.
+  prewarmAllOpenInquiries(account.officeId).catch(() => {});
 
   // Auto-classify any new email attachments into JobDocuments on linked jobs.
   // Limited to active (non-DELIVERED) jobs that received new messages this run.
