@@ -123,6 +123,12 @@ Set hasNoOffer=true ONLY when the thread genuinely has no price discussion (intr
     }));
   }
 
+  // Invalidate the inquiry's cached summary so the next read recomputes.
+  await prisma.inquiry.update({
+    where: { id: inquiryId },
+    data: { summaryCache: null, summaryCacheAt: null },
+  }).catch(() => {});
+
   revalidatePath(`/dashboard/rfq/${inquiryId}`);
   return { ok: true, threads: candidates.length, extracted };
 }

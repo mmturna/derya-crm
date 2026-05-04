@@ -394,6 +394,9 @@ model MarginProfile {
   @@index([officeId])
 }
 
+// Cache of computed summaries per Inquiry. Avoids re-running the extraction
+// + sort + JSON shaping on every agent query. Keyed by inquiryId, with kind
+// distinguishing different summary shapes (e.g. supplier-shortlist).
 model Inquiry {
   id            String   @id @default(cuid())
   officeId      String
@@ -415,6 +418,12 @@ model Inquiry {
   rawEmailBody  String?
   parsedData    String?  // JSON: AI-extracted fields
   notes         String?
+  // Pre-computed summary cache (JSON). Used by the agent's
+  // summarize_supplier_offers tool to skip re-parsing + ranking on every
+  // query. Cleared whenever a linked thread is added/updated/awarded so
+  // the next read regenerates.
+  summaryCache  String?
+  summaryCacheAt DateTime?
   receivedAt    DateTime @default(now())
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt

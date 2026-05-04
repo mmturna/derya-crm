@@ -623,11 +623,25 @@ export async function dispatchTool(
         const job = await prisma.job.findFirst({
           where: { id: resolvedJobId, officeId: ctx.officeId },
           include: {
-            inquiry: { include: { emailThreads: { include: { messages: { orderBy: { sentAt: "desc" }, take: 1 } } } } },
+            inquiry: {
+              include: {
+                emailThreads: { include: { messages: { orderBy: { sentAt: "desc" }, take: 1 } } },
+              },
+            },
           },
         });
         if (!job?.inquiry) return { ok: false, error: "Job has no linked inquiry" };
         if (job.type !== "SOURCING") return { ok: false, error: "Not a SOURCING job" };
+
+        // Persistent cache: 5-minute TTL. Avoids re-extracting + re-ranking
+        // 60+ supplier threads on every agent query.
+        const SUMMARY_TTL_MS = 5 * 60 * 1000;
+        if (job.inquiry.summaryCache && job.inquiry.summaryCacheAt &&
+            Date.now() - job.inquiry.summaryCacheAt.getTime() < SUMMARY_TTL_MS) {
+          try {
+            return { ok: true, result: { ...JSON.parse(job.inquiry.summaryCache), _cached: true, _age_seconds: Math.round((Date.now() - job.inquiry.summaryCacheAt.getTime()) / 1000) } };
+          } catch { /* fall through to recompute */ }
+        }
 
         // Re-extract if either (a) fewer than half of threads have any
         // supplierOffer parsed, OR (b) no thread has an actual extracted
@@ -666,7 +680,22 @@ export async function dispatchTool(
           };
         });
         offers.sort((a, b) => (a.price ?? Infinity) - (b.price ?? Infinity));
-        return { ok: true, result: { commodity: job.inquiry.commodity, destination: job.destination, offers } };
+        const summary = {
+          commodity: job.inquiry.commodity,
+          destination: job.destination,
+          offers,
+          stats: {
+            total: offers.length,
+            with_price: offers.filter((o) => o.price != null).length,
+            cheapest: offers.find((o) => o.price != null) ?? null,
+          },
+        };
+        // Persist cache.
+        await prisma.inquiry.update({
+          where: { id: job.inquiry.id },
+          data: { summaryCache: JSON.stringify(summary), summaryCacheAt: new Date() },
+        }).catch(() => {});
+        return { ok: true, result: summary };
       }
       case "summarize_carrier_rates": {
         if (!jobId) return { ok: false, error: "No job in scope" };

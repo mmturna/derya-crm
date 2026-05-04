@@ -41,6 +41,11 @@ export async function awardSupplier(threadId: string): Promise<
     where: { id: thread.id },
     data: { awardedAt: new Date() },
   });
+  // Invalidate cached supplier-offers summary on this inquiry.
+  await prisma.inquiry.update({
+    where: { id: thread.inquiry.id },
+    data: { summaryCache: null, summaryCacheAt: null },
+  }).catch(() => {});
 
   // Advance job to BOOKED ("Awarded") and stash supplier cost.
   let jobId: string | null = null;
