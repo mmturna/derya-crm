@@ -43,17 +43,30 @@ export async function extractSourcingOffersForInquiry(
   const client = new Anthropic({ apiKey });
   let extracted = 0;
 
-  for (const thread of inquiry.emailThreads) {
-    if (thread.messages.length === 0) continue;
-    const transcript = thread.messages.map((m) => {
-      const dir = m.direction === "OUTBOUND" ? "[US OUT]" : "[INBOUND]";
-      return `${dir} ${m.sentAt.toISOString().split("T")[0]} · ${m.fromName ?? m.fromEmail}\n${m.bodyText ?? ""}`.trim();
-    }).join("\n\n────\n\n").slice(0, 12000);
+  // Skip threads that already have a recent extraction (saves the round-trip).
+  const STALE_AFTER_MS = 7 * 24 * 3600 * 1000;
+  const candidates = inquiry.emailThreads.filter((t) => {
+    if (t.messages.length === 0) return false;
+    if (t.supplierOfferAt && Date.now() - t.supplierOfferAt.getTime() < STALE_AFTER_MS) return false;
+    return true;
+  });
 
-    const result = await client.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 600,
-      system: `You analyze a single email thread between our office and ONE supplier (or one party). Extract the supplier's offer terms for the commodity "${inquiry.commodity ?? "(unknown)"}".
+  // Process in parallel batches so 60+ threads don't hit a function timeout.
+  // Batch size of 10 = ~6s for 60 threads instead of 60s.
+  const BATCH = 10;
+  for (let i = 0; i < candidates.length; i += BATCH) {
+    const slice = candidates.slice(i, i + BATCH);
+    await Promise.all(slice.map(async (thread) => {
+      try {
+        const transcript = thread.messages.map((m) => {
+          const dir = m.direction === "OUTBOUND" ? "[US OUT]" : "[INBOUND]";
+          return `${dir} ${m.sentAt.toISOString().split("T")[0]} · ${m.fromName ?? m.fromEmail}\n${m.bodyText ?? ""}`.trim();
+        }).join("\n\n────\n\n").slice(0, 12000);
+
+        const result = await client.messages.create({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 600,
+          system: `You analyze a single email thread between our office and ONE supplier (or one party). Extract the supplier's offer terms for the commodity "${inquiry.commodity ?? "(unknown)"}".
 
 Output ONLY this JSON (no markdown):
 {
@@ -73,28 +86,34 @@ Output ONLY this JSON (no markdown):
 }
 
 Be conservative — null over guessing. If the thread is just intro/banter with no concrete numbers, set hasNoOffer=true and leave price fields null.`,
-      messages: [{
-        role: "user",
-        content: `EMAIL THREAD (subject: "${thread.subject}", ${thread.messages.length} messages):\n\n${transcript}`,
-      }],
-    });
+          messages: [{
+            role: "user",
+            content: `EMAIL THREAD (subject: "${thread.subject}", ${thread.messages.length} messages):\n\n${transcript}`,
+          }],
+        });
 
-    const text = result.content[0].type === "text" ? result.content[0].text : "";
-    const m = text.match(/\{[\s\S]*\}/);
-    if (!m) continue;
-    let parsed: Partial<SupplierOffer> & { hasNoOffer?: boolean };
-    try { parsed = JSON.parse(m[0]); } catch { continue; }
-
-    await prisma.emailThread.update({
-      where: { id: thread.id },
-      data: {
-        supplierOffer: JSON.stringify(parsed),
-        supplierOfferAt: new Date(),
-      },
-    });
-    extracted++;
+        const text = result.content[0].type === "text" ? result.content[0].text : "";
+        const m = text.match(/\{[\s\S]*\}/);
+        if (!m) return;
+        let parsed: Partial<SupplierOffer> & { hasNoOffer?: boolean };
+        try { parsed = JSON.parse(m[0]); } catch { return; }
+        await thread_persist(thread.id, parsed);
+        extracted++;
+      } catch { /* one bad thread shouldn't fail the batch */ }
+    }));
   }
 
   revalidatePath(`/dashboard/rfq/${inquiryId}`);
-  return { ok: true, threads: inquiry.emailThreads.length, extracted };
+  return { ok: true, threads: candidates.length, extracted };
 }
+
+async function thread_persist(threadId: string, parsed: Partial<SupplierOffer> & { hasNoOffer?: boolean }) {
+  await prisma.emailThread.update({
+    where: { id: threadId },
+    data: {
+      supplierOffer: JSON.stringify(parsed),
+      supplierOfferAt: new Date(),
+    },
+  });
+}
+
