@@ -234,20 +234,19 @@ async function _chatWithAgentImpl(history: ChatMsg[], userMessage: string, scope
     return { reply: `Captured RFQ "${subject}". Open the inbox to see it parsed.`, ingestedInquiryId: inquiry.id };
   }
 
-  // Branch 2: tool-use loop. The AI sees the snapshot + scoped-job context,
-  // sees every tool with its schema, and decides what to call.
-  // ── PERF ──
-  // - buildOpsContext / buildScopedJobContext are cached for 20s per
-  //   officeId/jobId in module scope. Eliminates the Prisma roundtrip on the
-  //   hot path for follow-up messages.
-  // - System prompt + tools are wrapped with `cache_control: ephemeral` so
-  //   Anthropic prompt caching kicks in. The system block (~3-4k tokens) +
-  //   tool schemas (~5k tokens) are ~free on the second message in a session.
-  // - Tool calls within a single assistant turn dispatch in parallel.
-  // - MAX_TOOL_TURNS dropped 8 → 4. Most lookups need 1-2.
-  const [ctx, scopedCtx] = await Promise.all([
+  // Branch 2: tool-use loop with pre-fetched price context.
+  // ── PERF / RELIABILITY ──
+  // - For price/supplier/shortlist questions, we pre-fetch the cached
+  //   supplier-offer summary and inject it directly into the system prompt.
+  //   The agent stops trying to "figure out which tool to call" and just
+  //   formats the data we already have.
+  // - System prompt + tools wrapped with cache_control: ephemeral.
+  // - In-memory ctx caches (20s TTL).
+  // - Tools dispatch in parallel.
+  const [ctx, scopedCtx, priceContext] = await Promise.all([
     cachedOpsContext(session.officeId),
     scopeJobId ? cachedScopedJobContext(scopeJobId, session.officeId) : Promise.resolve(""),
+    isPriceQuery(userMessage) ? buildPriceContext(session.officeId, scopeJobId) : Promise.resolve(""),
   ]);
 
   const client = new Anthropic({ apiKey });
@@ -259,7 +258,7 @@ async function _chatWithAgentImpl(history: ChatMsg[], userMessage: string, scope
   // Use Anthropic prompt caching: the system prompt + tools array become a
   // cached prefix. Cache is reused for ~5 min from first miss.
   const systemBlocks: any[] = [
-    { type: "text", text: SYSTEM + "\n\n" + ctx + scopedCtx, cache_control: { type: "ephemeral" } },
+    { type: "text", text: SYSTEM + "\n\n" + ctx + scopedCtx + priceContext, cache_control: { type: "ephemeral" } },
   ];
   const toolsWithCache = ([...TOOLS] as any[]).map((t, i, arr) =>
     i === arr.length - 1 ? { ...t, cache_control: { type: "ephemeral" } } : t
@@ -327,6 +326,69 @@ async function _chatWithAgentImpl(history: ChatMsg[], userMessage: string, scope
     console.error("[agent-chat] tool-use loop failed:", msg, e);
     return { reply: `Agent error — ${msg.slice(0, 400)}` };
   }
+}
+
+// Detects "shortlist of prices we received" / "cheapest" / "what offers do we
+// have" — anything where the agent should ground its answer on the cached
+// supplier-offer summary instead of routing through tool selection.
+function isPriceQuery(userMessage: string): boolean {
+  const t = userMessage.toLowerCase();
+  return /\b(shortlist|cheapest|best (?:price|rate|offer)|prices?|pricing|rates?|offers?|how much|quotes?)\b/.test(t)
+      && !/\b(carrier|forwarder)\b/.test(t.slice(0, 80));  // carrier-rate questions go through summarize_carrier_rates
+}
+
+// Builds a "PRICE INTEL" block for the system prompt by reading the cached
+// summary off the focused inquiry (or the most recent open SOURCING
+// inquiry). Triggers a fresh extraction if the cache is empty/stale.
+async function buildPriceContext(officeId: string, scopeJobId?: string): Promise<string> {
+  const job = await prisma.job.findFirst({
+    where: scopeJobId
+      ? { id: scopeJobId, officeId }
+      : { officeId, type: "SOURCING", status: { notIn: ["DELIVERED", "CANCELLED"] } },
+    include: { inquiry: true },
+    orderBy: { updatedAt: "desc" },
+  });
+  if (!job?.inquiry || job.type !== "SOURCING") return "";
+
+  // If cache is empty or older than 5 min, kick off a synchronous prewarm so
+  // the data is available NOW. ~5-10s for the first call; sub-100ms after.
+  const SUMMARY_TTL_MS = 5 * 60 * 1000;
+  const stale = !job.inquiry.summaryCacheAt
+    || (Date.now() - job.inquiry.summaryCacheAt.getTime()) > SUMMARY_TTL_MS;
+  if (stale) {
+    const { prewarmInquirySummary } = await import("./prewarm-summary");
+    try { await prewarmInquirySummary(job.inquiry.id); } catch {}
+  }
+
+  // Re-read cache.
+  const inq = await prisma.inquiry.findUnique({
+    where: { id: job.inquiry.id },
+    select: { summaryCache: true },
+  });
+  if (!inq?.summaryCache) {
+    return `\n\nPRICE INTEL (focused on ${job.reference} — ${job.inquiry.commodity ?? "?"} → ${job.destination ?? "?"}):\n  No supplier offers parsed yet from the linked threads.\n`;
+  }
+
+  let s: any;
+  try { s = JSON.parse(inq.summaryCache); } catch { return ""; }
+  const offers = (s.offers ?? []) as any[];
+  const priced = offers.filter((o) => typeof o.price === "number" && o.price > 0);
+  if (priced.length === 0) {
+    return `\n\nPRICE INTEL (focused on ${job.reference} — ${s.commodity ?? "?"} → ${s.destination ?? "?"}):\n  ${offers.length} supplier thread${offers.length === 1 ? "" : "s"} parsed. None contain an explicit price yet — most are intro/clarifying replies. To find prices, the operator should re-sync emails or check if specific suppliers have replied since the last extraction.\n`;
+  }
+
+  const lines = [`\n\nPRICE INTEL (focused on ${job.reference} — ${s.commodity ?? "?"} → ${s.destination ?? "?"}):`];
+  lines.push(`  ${priced.length} priced supplier offer${priced.length === 1 ? "" : "s"} (cheapest first):`);
+  priced.slice(0, 12).forEach((o, i) => {
+    const tag = i === 0 ? " ← BEST" : "";
+    const meta = [o.qty && `qty ${o.qty}`, o.incoterms, o.origin && `origin ${o.origin}`, o.lead_time && `lead ${o.lead_time}`].filter(Boolean).join(" · ");
+    lines.push(`    ${i + 1}. ${o.supplier} — ${o.currency ?? ""} ${o.price}${o.unit ? `/${o.unit}` : ""}${tag}${meta ? ` (${meta})` : ""}`);
+  });
+  if (offers.length > priced.length) {
+    lines.push(`  ${offers.length - priced.length} additional supplier thread${offers.length - priced.length === 1 ? "" : "s"} corresponding without a firm price.`);
+  }
+  lines.push(`\nWhen the operator asks about prices/suppliers/shortlist, USE THIS DATA DIRECTLY. Do not search or call other tools — the answer is right here.`);
+  return lines.join("\n");
 }
 
 // ── In-memory caches for ops + scoped context (per office / per job).
