@@ -43,12 +43,24 @@ export async function extractSourcingOffersForInquiry(
   const client = new Anthropic({ apiKey });
   let extracted = 0;
 
-  // Skip threads that already have a recent extraction (saves the round-trip).
+  // Skip threads that already have a recent extraction WITH a real price
+  // (saves the round-trip). Re-parse threads that produced null/no-offer
+  // results — they may have been false negatives from a too-conservative
+  // earlier extraction, and prices might appear in threads we previously
+  // dismissed.
   const STALE_AFTER_MS = 7 * 24 * 3600 * 1000;
   const candidates = inquiry.emailThreads.filter((t) => {
     if (t.messages.length === 0) return false;
-    if (t.supplierOfferAt && Date.now() - t.supplierOfferAt.getTime() < STALE_AFTER_MS) return false;
-    return true;
+    if (!t.supplierOfferAt) return true;
+    if (Date.now() - t.supplierOfferAt.getTime() >= STALE_AFTER_MS) return true;
+    // Recent parse — re-parse only if the recent run produced no price.
+    if (!t.supplierOffer) return true;
+    try {
+      const o = JSON.parse(t.supplierOffer);
+      const hasPrice = typeof o.pricePerUnit === "number" && o.pricePerUnit > 0;
+      // If a real price exists, skip. Otherwise re-parse.
+      return !hasPrice;
+    } catch { return true; }
   });
 
   // Process in parallel batches so 60+ threads don't hit a function timeout.
@@ -85,7 +97,15 @@ Output ONLY this JSON (no markdown):
   "hasNoOffer": boolean                    // true if the thread has no offer-shaped content yet
 }
 
-Be conservative — null over guessing. If the thread is just intro/banter with no concrete numbers, set hasNoOffer=true and leave price fields null.`,
+Pricing extraction rules:
+- Look for ANY numeric price followed by /MT, /ton, /kg, /tonne, USD/MT, $/ton, EUR/MT, etc. Pull the number.
+- Common patterns: "$180/MT FOB", "USD 480 per ton", "180 USD/ton CFR", "EUR 195 per MT", "180\$/mt", "180 usd/ton".
+- If multiple prices appear, take the most recent inbound one (the supplier's latest quoted figure).
+- "$185 FOB Constanta" with no unit → infer /MT for grain commodities, /kg for samples, /piece for machinery.
+- Body might quote a range ("180-185 USD/ton") — take the lower bound.
+- Don't mark hasNoOffer=true just because you're unsure — extract whatever number you DO see.
+
+Set hasNoOffer=true ONLY when the thread genuinely has no price discussion (intro emails, sample requests, banter, "we received your inquiry").`,
           messages: [{
             role: "user",
             content: `EMAIL THREAD (subject: "${thread.subject}", ${thread.messages.length} messages):\n\n${transcript}`,

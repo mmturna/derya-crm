@@ -628,8 +628,23 @@ export async function dispatchTool(
         });
         if (!job?.inquiry) return { ok: false, error: "Job has no linked inquiry" };
         if (job.type !== "SOURCING") return { ok: false, error: "Not a SOURCING job" };
-        const parsedCount = job.inquiry.emailThreads.filter((t) => !!t.supplierOffer).length;
-        if (parsedCount < job.inquiry.emailThreads.length / 2) {
+
+        // Re-extract if either (a) fewer than half of threads have any
+        // supplierOffer parsed, OR (b) no thread has an actual extracted
+        // PRICE. The previous logic only checked (a), which made subsequent
+        // calls skip after the first all-null parse — even though no prices
+        // had ever been pulled.
+        const withAnyParse = job.inquiry.emailThreads.filter((t) => !!t.supplierOffer);
+        const withPrice = withAnyParse.filter((t) => {
+          try {
+            const o = JSON.parse(t.supplierOffer ?? "{}");
+            return typeof o.pricePerUnit === "number" && o.pricePerUnit > 0;
+          } catch { return false; }
+        });
+        const needsExtract =
+          withAnyParse.length < job.inquiry.emailThreads.length / 2 ||
+          withPrice.length === 0;
+        if (needsExtract) {
           try { await extractSourcingOffersForInquiry(job.inquiry.id); } catch {}
         }
         const reread = await prisma.emailThread.findMany({ where: { inquiryId: job.inquiry.id } });
