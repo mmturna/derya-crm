@@ -18,7 +18,63 @@ import { seedDemoLoad } from "./seed-demo-load";
 //
 // Uses mergeAllOpenInquiriesIntoOne(type=SOURCING, ...overrides) under the
 // hood. Idempotent — running it twice on a single-inquiry office does nothing.
-export async function consolidateAshgabatSoybeanLoad(): Promise<
+// Operator-specified consolidation: customer = Hyzmettaslar, destination =
+// Ashgabat, Turkmenistan, sourcing 300MT soybean meal. Plus duplicate-demo
+// cleanup: keep the most-progressed demo job, delete the rest.
+export async function fullDemoCleanup(): Promise<{
+  ok: true;
+  soybean: { jobId: string; reference: string; mergedCount: number };
+  demosDeleted: { reference: string; status: string }[];
+  customer: string;
+} | { error: string }> {
+  const session = await requireSession();
+  const officeId = session.officeId;
+
+  // Step 1: Consolidate soybean — same as before, but with customer set to
+  // "Hyzmettaslar" (Turkmenistan-side buyer).
+  const soybean = await consolidateAshgabatSoybeanLoad({
+    customerName: "Hyzmettaslar",
+  });
+  if ("error" in soybean) return { error: `Soybean consolidate failed: ${soybean.error}` };
+
+  // Step 2: Find every DEMO job (notes contain [DEMO_LOAD_SEED]). Keep the
+  // most-progressed one (status order: PROPOSED < INQUIRY < QUOTED < BOOKED <
+  // IN_TRANSIT < CUSTOMS < DELIVERED). Delete the rest.
+  const demos = await prisma.job.findMany({
+    where: { officeId, notes: { contains: "[DEMO_LOAD_SEED]" } },
+    select: { id: true, reference: true, status: true, inquiryId: true },
+  });
+  const STATUS_ORDER = ["PROPOSED", "INQUIRY", "QUOTED", "BOOKED", "IN_TRANSIT", "CUSTOMS", "DELIVERED"];
+  const sorted = [...demos].sort((a, b) => STATUS_ORDER.indexOf(b.status) - STATUS_ORDER.indexOf(a.status));
+  const keeper = sorted[0];
+  const losers = sorted.slice(1);
+  const demosDeleted: { reference: string; status: string }[] = [];
+  for (const loser of losers) {
+    // Delete the demo's job, its inquiry, and orphan the threads (they shouldn't have any).
+    if (loser.inquiryId) {
+      await prisma.emailThread.updateMany({ where: { inquiryId: loser.inquiryId }, data: { inquiryId: null } });
+      await prisma.carrierQuote.deleteMany({ where: { inquiryId: loser.inquiryId } }).catch(() => {});
+    }
+    await prisma.job.delete({ where: { id: loser.id } }).catch(() => {});
+    if (loser.inquiryId) {
+      await prisma.inquiry.delete({ where: { id: loser.inquiryId } }).catch(() => {});
+    }
+    demosDeleted.push({ reference: loser.reference, status: loser.status });
+  }
+
+  revalidatePath("/dashboard/jobs");
+  revalidatePath("/dashboard/inbox");
+  return {
+    ok: true,
+    soybean: { jobId: soybean.jobId, reference: soybean.reference, mergedCount: soybean.mergedCount },
+    demosDeleted,
+    customer: "Hyzmettaslar",
+  };
+}
+
+export async function consolidateAshgabatSoybeanLoad(opts: {
+  customerName?: string;
+} = {}): Promise<
   | { ok: true; jobId: string; reference: string; mergedCount: number }
   | { error: string }
 > {
@@ -111,6 +167,42 @@ export async function consolidateAshgabatSoybeanLoad(): Promise<
 
   // Re-extract supplier offers so the comparison table is populated.
   try { await extractSourcingOffersForInquiry(keeperInquiryId); } catch {}
+
+  // Apply operator-specified customer if requested. Creates a Company by name
+  // (case-insensitive) and links it to both the inquiry and the job.
+  if (opts.customerName) {
+    let company = await prisma.company.findFirst({
+      where: { officeId: session.officeId, name: { equals: opts.customerName, mode: "insensitive" } },
+      select: { id: true, name: true },
+    });
+    if (!company) {
+      try {
+        company = await prisma.company.create({
+          data: {
+            officeId: session.officeId,
+            name: opts.customerName,
+            status: "WORKED",
+            class1: "Active",
+            direction: "Import",
+            product: "Sea",
+          },
+          select: { id: true, name: true },
+        });
+      } catch {
+        // unique race — re-fetch
+        company = await prisma.company.findFirst({
+          where: { officeId: session.officeId, name: opts.customerName },
+          select: { id: true, name: true },
+        });
+      }
+    }
+    if (company) {
+      await prisma.inquiry.update({ where: { id: keeperInquiryId }, data: { companyId: company.id } });
+      if (keeperJobId) {
+        await prisma.job.update({ where: { id: keeperJobId }, data: { companyId: company.id } });
+      }
+    }
+  }
 
   revalidatePath("/dashboard/jobs");
   revalidatePath("/dashboard/inbox");

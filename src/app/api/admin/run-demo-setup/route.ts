@@ -1,5 +1,5 @@
-import { NextResponse } from "next/server";
-import { setupDemoEnvironment } from "@/lib/setup-demo-actions";
+import { NextResponse, NextRequest } from "next/server";
+import { setupDemoEnvironment, fullDemoCleanup } from "@/lib/setup-demo-actions";
 
 // Direct URL endpoint for running the demo setup. Bypasses the button — if
 // the JS UI fails to fire the action, you can hit this URL in your browser
@@ -7,8 +7,13 @@ import { setupDemoEnvironment } from "@/lib/setup-demo-actions";
 //
 // Both GET (browser-friendly) and POST work. Auth is enforced by
 // setupDemoEnvironment's underlying requireSession call.
-async function run() {
+async function run(mode: string) {
   try {
+    if (mode === "cleanup") {
+      const result = await fullDemoCleanup();
+      if ("error" in result) return NextResponse.json({ ok: false, error: result.error }, { status: 500 });
+      return NextResponse.json(result, { status: 200 });
+    }
     const result = await setupDemoEnvironment();
     return NextResponse.json({ ok: true, ...result }, { status: 200 });
   } catch (e) {
@@ -20,5 +25,5 @@ async function run() {
   }
 }
 
-export async function GET() { return run(); }
-export async function POST() { return run(); }
+export async function GET(req: NextRequest) { return run(req.nextUrl.searchParams.get("mode") ?? "setup"); }
+export async function POST(req: NextRequest) { return run(req.nextUrl.searchParams.get("mode") ?? "setup"); }
